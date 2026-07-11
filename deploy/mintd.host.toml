@@ -1,0 +1,43 @@
+# cdk-mintd config for the hosted fibernuts mint (docker compose).
+# Committed and SECRET-FREE: the mnemonic and public URL are injected at runtime from .env via
+# CDK_MINTD_MNEMONIC and CDK_MINTD_URL, which override the blank values below.
+
+[info]
+# Overridden by CDK_MINTD_URL (= https://$MINT_DOMAIN). Must equal the domain Caddy serves —
+# it is embedded in the mint's NUT-06 info and every quote URL.
+url = ""
+# Bind on all interfaces INSIDE fnn's network namespace, so the separate Caddy container can
+# reach it at fnn:8085. mintd has no biscuit auth, and 8085 is never published to the host.
+listen_host = "0.0.0.0"
+listen_port = 8085
+enable_info_page = true
+# Overridden by CDK_MINTD_MNEMONIC. Never commit a real mnemonic here.
+mnemonic = ""
+
+[info.quote_ttl]
+mint_ttl = 600
+melt_ttl = 120
+
+[info.http_cache]
+backend = "memory"
+ttl = 60
+tti = 60
+
+[database]
+engine = "sqlite"
+
+[ln]
+ln_backend = "grpcprocessor"
+unit = "rusd"
+# Bounds in ecash units (1 unit = 1 RUSD cent → $0.01 .. $10,000). Keep max under your channel
+# capacity so a mint can never exceed the RUSD the node actually holds.
+min_mint = 1
+max_mint = 1000000
+min_melt = 1
+max_melt = 1000000
+
+[grpc_processor]
+# fibernuts-processor, reachable on loopback because it shares fnn's namespace.
+# The http:// scheme is required.
+addr = "http://127.0.0.1"
+port = 50051

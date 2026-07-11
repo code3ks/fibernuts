@@ -1,0 +1,29 @@
+[workspace]
+members = ["cdk-fiber", "processor"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/truthixify/fibernuts"
+
+[workspace.dependencies]
+cdk-common = { version = "=0.17.2", features = ["mint"] }
+# Default features pull cdk-cln/cdk-lnd/cdk-fake-wallet (+rusqlite) for the crate's own
+# bundled binary. We use only the gRPC server type.
+cdk-payment-processor = { version = "=0.17.2", default-features = false }
+
+async-trait = "0.1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

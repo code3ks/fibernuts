@@ -1,0 +1,124 @@
+# fibernuts — the whole hosted mint on one box.
+#
+#   fnn (Fiber node) ── loopback ── fibernuts-processor ── loopback ── cdk-mintd
+#   and Caddy terminates TLS in front of the mint's HTTP API.
+#
+# The processor and mintd join fnn's network namespace (`network_mode: service:fnn`) so all three
+# reach each other on 127.0.0.1 — which keeps fnn's RPC private (no biscuit auth needed) while its
+# P2P port is public for routing. Because they share fnn's namespace, they publish NO ports of
+# their own: every published port is declared on the `fnn` service.
+#
+# First run:  cp .env.example .env  (fill it in),  then  docker compose up -d --build
+
+name: fibernuts
+
+services:
+  # ── detect THIS server's public IP once, so you never type it in ────────────
+  ipinit:
+    image: alpine:3
+    command:
+      - sh
+      - -c
+      - |
+        for u in https://api.ipify.org https://ifconfig.me https://icanhazip.com; do
+          ip=$$(wget -qO- "$$u" 2>/dev/null | tr -d '[:space:]'); [ -n "$$ip" ] && break
+        done
+        printf '%s' "$${PUBLIC_IP:-$$ip}" > /fiber/public_ip
+        echo "[ipinit] public IP: $$(cat /fiber/public_ip)"
+    environment:
+      PUBLIC_IP: ${PUBLIC_IP:-}      # optional override; normally auto-detected
+    volumes:
+      - fnn-data:/fiber
+    networks: [mintnet]
+    restart: "no"
+
+  # ── the Fiber node: public P2P, private loopback RPC ────────────────────────
+  fnn:
+    image: nervos/fiber:0.9.0-rc7
+    entrypoint: ["/bin/sh", "/fnn-entrypoint.sh"]
+    environment:
+      # Both optional — the node password is auto-generated, the IP auto-detected.
+      FIBER_SECRET_KEY_PASSWORD: ${FIBER_SECRET_KEY_PASSWORD:-}
+      PUBLIC_IP: ${PUBLIC_IP:-}
+      MINT_NODE_NAME: ${MINT_NODE_NAME:-fibernuts-mint}
+      RUST_LOG: info
+    volumes:
+      - fnn-data:/fiber
+      - ./fnn-entrypoint.sh:/fnn-entrypoint.sh:ro
+    ports:
+      - "8228:8228"       # Fiber P2P — public, required for routing/announcement
+    networks: [mintnet]
+    depends_on:
+      ipinit:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "fnn-cli", "--url", "http://127.0.0.1:8227", "info"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ── the cdk-fiber gRPC backend ──────────────────────────────────────────────
+  processor:
+    build:
+      context: ../mint
+      dockerfile: ../deploy/processor.Dockerfile
+    environment:
+      FIBERNUTS_FIBER_RPC: http://127.0.0.1:8227
+      FIBERNUTS_LISTEN_ADDR: 127.0.0.1
+      FIBERNUTS_LISTEN_PORT: "50051"
+      FIBERNUTS_NETWORK: ${FIBERNUTS_NETWORK:-testnet}
+      FIBERNUTS_UNIT: ${FIBERNUTS_UNIT:-rusd}
+      FIBERNUTS_UNIT_SCALE: ${FIBERNUTS_UNIT_SCALE:-1000000}
+      RUST_LOG: info,cdk_fiber=debug
+    network_mode: "service:fnn"     # share fnn's loopback; reach it at 127.0.0.1:8227
+    depends_on:
+      fnn:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── the stock Cashu mint (unforked, official image) ─────────────────────────
+  mintd:
+    image: cashubtc/mintd:0.17.2
+    # This image has CMD ["cdk-mintd"] and NO ENTRYPOINT, so the binary name must be repeated.
+    command: ["cdk-mintd", "--work-dir", "/data", "--config", "/data/config.toml", "--enable-logging"]
+    environment:
+      CDK_MINTD_URL: https://${MINT_DOMAIN}
+      CDK_MINTD_MNEMONIC: ${MINT_MNEMONIC}
+    volumes:
+      - mintd-data:/data
+      - ./mintd.host.toml:/data/config.toml:ro
+    network_mode: "service:fnn"     # reach the processor at 127.0.0.1:50051
+    depends_on:
+      - processor
+    restart: unless-stopped
+
+  # ── TLS reverse proxy for the mint API ──────────────────────────────────────
+  caddy:
+    image: caddy:2
+    environment:
+      MINT_DOMAIN: ${MINT_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"     # HTTP/3
+    networks: [mintnet]
+    depends_on:
+      - fnn                # mintd shares fnn's namespace, so Caddy proxies to fnn:8085
+    restart: unless-stopped
+
+networks:
+  mintnet:
+    driver: bridge
+
+volumes:
+  fnn-data:      # config.yml, the encrypted CKB key, channel + graph store — BACK THIS UP
+  mintd-data:    # SQLite: which quotes are paid, which proofs are spent
+  caddy-data:    # Let's Encrypt certificates
+  caddy-config:

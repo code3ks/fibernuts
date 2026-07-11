@@ -1,0 +1,10 @@
+# Automatic HTTPS in front of the mint API. Caddy fetches a Let's Encrypt cert for $MINT_DOMAIN
+# (needs ports 80 + 443 reachable and the domain's A record pointing at this host).
+# $MINT_DOMAIN comes from the container environment (set from .env by compose).
+
+{$MINT_DOMAIN} {
+	# mintd listens on 0.0.0.0:8085 inside fnn's network namespace; the fnn container is
+	# reachable by name on the shared bridge network.
+	reverse_proxy fnn:8085
+	encode zstd gzip
+}

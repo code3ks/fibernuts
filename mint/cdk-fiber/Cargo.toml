@@ -1,0 +1,26 @@
+[package]
+name = "cdk-fiber"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fiber Network payment backend for the Cashu Development Kit (CDK)."
+
+[dependencies]
+cdk-common.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+tokio = { workspace = true }
+tokio-stream.workspace = true
+tokio-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+serde_json.workspace = true
+futures.workspace = true
+async-trait.workspace = true

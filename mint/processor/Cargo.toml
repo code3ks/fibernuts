@@ -1,0 +1,14 @@
+[package]
+name = "fibernuts-processor"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+cdk-fiber = { path = "../cdk-fiber" }
+cdk-payment-processor.workspace = true
+cdk-common.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
