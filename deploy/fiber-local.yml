@@ -1,0 +1,11 @@
+base_dir: /fiber
+rpc_listen: 0.0.0.0:8227
+listening_addr: /ip4/0.0.0.0/tcp/8228
+announced_node_name: fibernuts-local
+auto_accept_channel_ckb_funding_amount: 0
+tlc_expiry_delta: 144
+tlc_min_value: 0
+tlc_max_value: 18446744073709551615
+tlc_fee_proportional_millionths: 1000
+channel_cell_lock_code_hash: 0x0000000000000000000000000000000000000000000000000000000000000000
+udt_whitelist: []

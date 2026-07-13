@@ -11,7 +11,7 @@ url = "http://127.0.0.1:8085"
 listen_host = "127.0.0.1"
 listen_port = 8085
 # Replace before running anything you care about: this seeds the mint's signing keys.
-mnemonic = "put your own twelve word mnemonic here before you run this mint at all"
+mnemonic = "abandon ability able about above absent absorb abstract absurd abuse access accident"
 
 [ln]
 # Exact serde spelling of LnBackend::GrpcProcessor. Not "grpc-processor", not "grpc_processor".

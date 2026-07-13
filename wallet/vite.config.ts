@@ -9,6 +9,12 @@ export default defineConfig({
   server: {
     port: 5174,
     // Proxying keeps the dev wallet same-origin, so a mint without permissive CORS still works.
-    proxy: { "/v1": { target: MINT, changeOrigin: true } },
+    proxy: { 
+      "/v1": { 
+        target: MINT, 
+        changeOrigin: true,
+        secure: false, // Allow self-signed certificates
+      } 
+    },
   },
 });

@@ -160,7 +160,7 @@ curl -s http://127.0.0.1:8237 -H 'content-type: application/json' \
 The processor defaults are already correct for testnet RUSD — only the RPC URL changes:
 
 ```sh
-cd /Users/truthixify/dev/hacks/fib/fibernuts
+cd fibernuts  # your fibernuts project directory
 cargo build --release --manifest-path mint/Cargo.toml -p fibernuts-processor
 FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 ./mint/target/release/fibernuts-processor
 # NETWORK=testnet (Fibt), UNIT=rusd, UNIT_SCALE=1000000, and the RUSD script are all defaults.

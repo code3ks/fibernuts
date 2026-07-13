@@ -71,7 +71,32 @@ with zero external dependencies (the asset is a dev UDT standing in for RUSD), a
 **`deploy/testnet.md`** does it on public testnet with the real Stable++ RUSD — honest about the one
 hard part, which is acquiring testnet RUSD.
 
-## Run it
+## Try the live mint
+
+A mint is live on public testnet at **https://mint.strawhatcrew.xyz**, with the wallet at
+**https://fibernuts.strawhatcrew.xyz** — open it and it's already pointed at the mint. Holding,
+sending, and receiving ecash needs nothing but that URL.
+
+To **mint** (deposit RUSD) you pay the mint's Fiber invoice from your own Fiber node, so first
+connect your node to the mint and open an RUSD channel (the mint auto-accepts channels ≥ 10 RUSD):
+
+```sh
+fnn() { fnn-cli -u <your-node-rpc> "$@"; }
+MINT_ADDR="/ip4/192.241.151.135/tcp/8228/p2p/QmViPrRPGD8SFsnXt2X3bd8becn7sc1xpBV1hCooMUsKGH"
+MINT_PUBKEY="02b97fb5bb5e6b60a65ab129065e3d4de16e57a5cc3069ba78164bf7f7e956bc34"   
+RUSD='{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"}'
+
+fnn peer connect_peer --address "$MINT_ADDR"
+fnn channel open_channel --pubkey "$MINT_PUBKEY" --funding-amount 1000000000 --public true --funding-udt-type-script "$RUSD"
+fnn channel list_channels        # wait until state is ChannelReady
+```
+
+Then in the wallet: **Mint** → enter an amount → it shows a `fibt…` invoice → pay it with
+`fnn payment send_payment --invoice <fibt…>` and the balance credits. **Send/Receive** move ecash
+browser-to-browser; **Melt** cashes out to an invoice from `fnn invoice new_invoice --currency Fibt
+--udt-type-script "$RUSD"`. Wallet amounts are RUSD; `fnn-cli` uses base units (`1.00 RUSD = 100_000_000`).
+
+## Run your own mint
 
 You need a Fiber node, `protoc`, and a Rust toolchain.
 
