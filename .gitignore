@@ -10,3 +10,12 @@ tmp/
 *.sqlite-shm
 *.sqlite-wal
 **/*.rs.bk
+
+# Fiber node directories
+fiber-demo-wallet/
+fiber-node/
+undefined/
+
+# Temporary files
+*.tmp
+temp_*.txt
