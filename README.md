@@ -1,5 +1,8 @@
 # fibernuts
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org/)
+
 > A Cashu mint that settles over the **Fiber Network**, issuing ecash denominated in **RUSD** — a
 > stablecoin, not a volatile coin.
 
