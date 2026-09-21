@@ -1,9 +1,9 @@
-# Who runs this, and how people use it
+# FiberNuts protocol deployment model
 
 A fair question, because "a mint" is infrastructure and the deployment model isn't obvious. The
-short version: **fibernuts is not one hosted service — it's software an operator self-hosts to run
-their own mint, the way you'd run a mail server or a Lightning node.** Anyone can stand one up; each
-mint is independent.
+short version: **FiberNuts is not one hosted service. It is protocol software an operator self-hosts
+to run an independent mint, much like a mail server or Lightning node.** Anyone can stand one up;
+each mint has its own issuer, reserves, policies, and trust boundary.
 
 ## The two sides
 
@@ -18,7 +18,7 @@ wants to issue ecash backed by RUSD on Fiber. They run four things on a server:
 ```
 
 - a **Fiber node**, with RUSD channels — this is the operator's liquidity and settlement rail;
-- **fibernuts-processor**, the gRPC backend (this is where `cdk-fiber`, the deliverable, runs);
+- **fibernuts-processor**, the gRPC backend where the core `cdk-fiber` adapter runs;
 - **cdk-mintd**, the stock Cashu mint server, exposing an HTTP API at, say, `https://mint.acme.com`;
 - optionally the **wallet** as a static site, though users can bring their own.
 
@@ -35,10 +35,10 @@ plus local token handling.
 
 ## Is it hosted?
 
-Not centrally. There is no single fibernuts service everyone shares. The model is **one operator,
-one mint** — federated, like email servers or Lightning nodes. For the hackathon there'd be **one
-reference instance** (deploy it to a VPS, Railway, Render, Fly — anywhere that runs a Rust binary and
-can reach a Fiber node), and that instance is both the demo and the template others copy.
+Not centrally. There is no canonical FiberNuts service everyone shares. The model is **one operator,
+one mint**, federated like email servers or Lightning nodes. A project-maintained reference instance
+can demonstrate interoperability and provide a deployment template, but it is not a protocol trust
+anchor and other operators do not depend on it.
 
 `cdk-fiber` itself isn't "hosted" at all — it's a **library**, compiled into the processor. The
 upstream goal is for it to live in `cashubtc/cdk` next to `cdk-cln` and `cdk-lnd`, so *any* Cashu
@@ -61,9 +61,10 @@ This is the same tradeoff every Cashu mint makes; fibernuts's contribution is ma
 asset a **stablecoin settled over Fiber**, so the IOU is denominated in dollars rather than a
 volatile coin, and the in/out rails are CKB payment channels.
 
-## What a real deployment needs beyond the demo
+## Production deployment requirements
 
-The demos in `devnet.md` / `testnet.md` are the mechanism. A production mint additionally needs:
+The `devnet.md` and `testnet.md` runbooks verify the protocol mechanism. A production mint also
+needs:
 
 - **Liquidity.** Inbound RUSD channels so users can mint, outbound so they can melt. This is the
   genuine operational work — the same liquidity management any Lightning/Fiber node operator does.

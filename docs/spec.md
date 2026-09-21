@@ -1,11 +1,11 @@
-# fibernuts — specification
+# FiberNuts protocol specification
 
 ## 1. What this is
 
-**fibernuts** is a Cashu mint that settles over the **Fiber Network**, issuing ecash denominated in
-**RUSD** — a stablecoin, not a volatile asset.
+**FiberNuts** is a Cashu-to-Fiber settlement protocol adapter with a reference mint deployment. It
+issues ecash denominated in **RUSD**, a stablecoin rather than a volatile asset.
 
-The judged artifact is **`cdk-fiber`**: a crate implementing the Cashu Development Kit's
+The core protocol adapter is **`cdk-fiber`**: a crate implementing the Cashu Development Kit's
 `MintPayment` trait against a Fiber node's JSON-RPC API. With it, an **unmodified `cdk-mintd`**
 becomes a Fiber-settled mint. Nothing is forked.
 
@@ -23,9 +23,9 @@ Three properties follow from the combination, and none of them hold for either s
 
 | component | what it is |
 |---|---|
-| `mint/cdk-fiber` | library crate: `MintPayment` over Fiber JSON-RPC. The deliverable. |
+| `mint/cdk-fiber` | core library crate: `MintPayment` over Fiber JSON-RPC |
 | `mint/processor` | `fibernuts-processor` binary: serves `cdk-fiber` over cdk's gRPC payment-processor protocol |
-| `wallet/` | a demo wallet that mints, sends, receives and melts RUSD ecash |
+| `wallet/` | a reference wallet that mints, sends, receives and melts RUSD ecash |
 | `deploy/` | `cdk-mintd` config, plus `devnet.md`: the full cycle on a local Fiber devnet |
 
 ### Why an out-of-process processor
@@ -131,8 +131,8 @@ for real, waits for the node to park the TLC in `Received`, and asserts nothing 
 
 ## 7. Scope
 
-**In scope.** Mint and melt of RUSD ecash over Fiber; a stock `cdk-mintd`; a demo wallet; a local
-devnet (`deploy/devnet.md`) and testnet.
+**In scope.** Mint and melt of RUSD ecash over Fiber; a stock `cdk-mintd`; a reference wallet; a
+local devnet (`deploy/devnet.md`) and testnet.
 
 **Out of scope.** Multi-unit mints (one unit per processor instance); Lightning interop via the
 cross-chain hub; onchain mint/melt; a `payment_proof` (the Fiber node exposes no preimage — see

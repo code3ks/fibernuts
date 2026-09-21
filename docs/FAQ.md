@@ -9,7 +9,8 @@ Fibernuts is a Cashu mint backend that settles over Fiber Network, enabling inst
 RUSD is a stablecoin on the Nervos CKB blockchain issued by Stable++.
 
 ### Is this production-ready?
-This is a hackathon project and reference implementation. Use at your own risk.
+The protocol implementation is under active development. The reference deployment is testnet-only
+and has not received a formal security audit. Use at your own risk.
 
 ## Technical
 

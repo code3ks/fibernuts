@@ -1,6 +1,10 @@
 target/
 node_modules/
 dist/
+test-results/
+playwright-report/
+claude-session.jsonl
+codex-session.jsonl
 .env
 .env.*
 !.env.example
@@ -10,12 +14,3 @@ tmp/
 *.sqlite-shm
 *.sqlite-wal
 **/*.rs.bk
-
-# Fiber node directories
-fiber-demo-wallet/
-fiber-node/
-undefined/
-
-# Temporary files
-*.tmp
-temp_*.txt

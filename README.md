@@ -1,19 +1,14 @@
-# fibernuts
+# FiberNuts
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org/)
-
-> A Cashu mint that settles over the **Fiber Network**, issuing ecash denominated in **RUSD** — a
-> stablecoin, not a volatile coin.
-
-Built for the **"Gone in 60ms" Fiber Network Infrastructure Hackathon**.
+> An open protocol adapter connecting **Cashu ecash** to **Fiber Network** settlement, with **RUSD**
+> as the reference stablecoin asset.
 
 ## What it is
 
-The deliverable is **`cdk-fiber`**: a Rust crate implementing the [Cashu Development
-Kit](https://github.com/cashubtc/cdk)'s `MintPayment` trait against a Fiber node's JSON-RPC API.
-Drop it in and an **unmodified `cdk-mintd`** becomes a Fiber-settled Cashu mint. Nothing is forked,
-patched, or vendored.
+FiberNuts is a Cashu-over-Fiber protocol implementation. Its core library is **`cdk-fiber`**, a Rust
+crate implementing the [Cashu Development Kit](https://github.com/cashubtc/cdk)'s `MintPayment`
+trait against a Fiber node's JSON-RPC API. Drop it in and an **unmodified `cdk-mintd`** becomes a
+Fiber-settled Cashu mint. Nothing is forked, patched, or vendored.
 
 Three properties come out of the combination, and none of them hold for either system alone:
 
@@ -32,10 +27,10 @@ wallet ──HTTP──▶ cdk-mintd ──gRPC──▶ fibernuts-processor ─
 
 | component | what it is |
 |---|---|
-| `mint/cdk-fiber/` | the payment backend: cdk's `MintPayment` over Fiber JSON-RPC. **The artifact.** |
-| `mint/processor/` | `fibernuts-processor`, serving that backend over cdk's gRPC protocol |
-| `wallet/` | a demo wallet: mint, send, receive, melt RUSD ecash |
-| `deploy/` | `compose.yaml` + `HOSTING.md` to run the whole mint on a VPS; `devnet.md` / `testnet.md` runbooks |
+| `mint/cdk-fiber/` | the core protocol adapter: CDK's `MintPayment` over Fiber JSON-RPC |
+| `mint/processor/` | `fibernuts-processor`, serving the adapter over CDK's gRPC protocol |
+| `wallet/` | a reference wallet for minting, sending, receiving, and melting RUSD ecash |
+| `deploy/` | operator deployment plus reproducible devnet and testnet integration environments |
 
 **Who runs this?** An operator self-hosts the mint (a Fiber node + `fibernuts-processor` + a stock
 `cdk-mintd`); users point any Cashu wallet at it and hold bearer ecash. It's federated infrastructure
@@ -43,7 +38,7 @@ wallet ──HTTP──▶ cdk-mintd ──gRPC──▶ fibernuts-processor ─
 custodial trust tradeoff; **`deploy/HOSTING.md` + `deploy/compose.yaml`** stand the whole mint up on a
 server with one `docker compose up`.
 
-## Status
+## Protocol status
 
 **The full cycle works, with real money moving across real payment channels.** Verified against a
 live 3-node Fiber devnet (`nervos/fiber:0.9.0-rc7`) and a stock `cdk-mintd 0.17.2` installed

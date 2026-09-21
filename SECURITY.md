@@ -2,7 +2,8 @@
 
 ## Supported Versions
 
-This is a hackathon/research project. Use at your own risk.
+FiberNuts is protocol software under active development. The reference deployment is testnet-only
+and has not received a formal security audit. Use at your own risk.
 
 | Version | Supported          |
 | ------- | ------------------ |

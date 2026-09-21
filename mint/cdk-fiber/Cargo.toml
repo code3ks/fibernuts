@@ -3,7 +3,6 @@ name = "cdk-fiber"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 description = "Fiber Network payment backend for the Cashu Development Kit (CDK)."
 
 [dependencies]

@@ -1,0 +1,163 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--canvas);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: var(--ink);
+  background-color: var(--canvas);
+  background-image: repeating-linear-gradient(0deg, rgb(24 32 28 / 2%) 0, rgb(24 32 28 / 2%) 1px, transparent 1px, transparent 5px);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea {
+  color: inherit;
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+a,
+button,
+input,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 3px solid rgb(15 91 67 / 28%);
+  outline-offset: 2px;
+}
+
+::selection {
+  color: var(--surface);
+  background: var(--primary);
+}
+
+h1,
+h2,
+h3,
+p,
+dl,
+dd {
+  margin: 0;
+}
+
+svg {
+  flex: 0 0 auto;
+}
+
+.mono,
+code {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.eyebrow {
+  display: block;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.field {
+  display: grid;
+  gap: 7px;
+}
+
+.field__label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field input,
+.field textarea {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+  padding: 11px 13px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.field textarea {
+  min-height: 112px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.field input:hover,
+.field textarea:hover {
+  border-color: #8e9c94;
+}
+
+.field input:focus,
+.field textarea:focus {
+  border-color: var(--primary);
+  outline: 0;
+  box-shadow: 0 0 0 3px rgb(15 91 67 / 12%);
+}
+
+.field input:disabled,
+.field textarea:disabled {
+  color: var(--ink-faint);
+  background: var(--surface-muted);
+}
+
+.field__hint,
+.field__error {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.field__hint {
+  color: var(--ink-muted);
+}
+
+.field__error {
+  color: var(--failed);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
