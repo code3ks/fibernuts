@@ -1,7 +1,7 @@
-# fibernuts — the whole hosted mint on one box.
+# fibernuts — the hosted mint and payment relay on one box.
 #
 #   fnn (Fiber node) ── loopback ── fibernuts-processor ── loopback ── cdk-mintd
-#   and Caddy terminates TLS in front of the mint's HTTP API.
+#   plus an isolated payment relay; Caddy terminates TLS for both public APIs.
 #
 # The processor and mintd join fnn's network namespace (`network_mode: service:fnn`) so all three
 # reach each other on 127.0.0.1 — which keeps fnn's RPC private (no biscuit auth needed) while its
@@ -69,9 +69,9 @@ services:
       FIBERNUTS_FIBER_RPC: http://127.0.0.1:8227
       FIBERNUTS_LISTEN_ADDR: 127.0.0.1
       FIBERNUTS_LISTEN_PORT: "50051"
-      FIBERNUTS_NETWORK: ${FIBERNUTS_NETWORK:-testnet}
-      FIBERNUTS_UNIT: ${FIBERNUTS_UNIT:-rusd}
-      FIBERNUTS_UNIT_SCALE: ${FIBERNUTS_UNIT_SCALE:-1000000}
+      FIBERNUTS_NETWORK: testnet
+      FIBERNUTS_UNIT: rusd
+      FIBERNUTS_UNIT_SCALE: "1000000"
       RUST_LOG: info,cdk_fiber=debug
     network_mode: "service:fnn"     # share fnn's loopback; reach it at 127.0.0.1:8227
     depends_on:
@@ -95,11 +95,31 @@ services:
       - processor
     restart: unless-stopped
 
+  # ── capability-scoped NUT-18 payment delivery ──────────────────────────────
+  relay:
+    build:
+      context: ../relay
+      dockerfile: Dockerfile
+    environment:
+      FIBERNUTS_RELAY_HOST: 0.0.0.0
+      FIBERNUTS_RELAY_PORT: "8090"
+      FIBERNUTS_RELAY_DATABASE: /app/data/relay.sqlite3
+      FIBERNUTS_RELAY_PUBLIC_ORIGIN: https://${RELAY_DOMAIN}
+      FIBERNUTS_RELAY_ALLOWED_ORIGINS: ${MARKET_ALLOWED_ORIGINS}
+      FIBERNUTS_RELAY_MAX_TTL_SECONDS: ${RELAY_MAX_TTL_SECONDS:-600}
+      FIBERNUTS_RELAY_RETENTION_SECONDS: ${RELAY_RETENTION_SECONDS:-3600}
+      FIBERNUTS_RELAY_MAX_REQUESTS_PER_MINUTE: ${RELAY_MAX_REQUESTS_PER_MINUTE:-120}
+    volumes:
+      - relay-data:/app/data
+    networks: [mintnet]
+    restart: unless-stopped
+
   # ── TLS reverse proxy for the mint API ──────────────────────────────────────
   caddy:
     image: caddy:2
     environment:
       MINT_DOMAIN: ${MINT_DOMAIN}
+      RELAY_DOMAIN: ${RELAY_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -111,6 +131,7 @@ services:
     networks: [mintnet]
     depends_on:
       - fnn                # mintd shares fnn's namespace, so Caddy proxies to fnn:8085
+      - relay
     restart: unless-stopped
 
 networks:
@@ -122,3 +143,4 @@ volumes:
   mintd-data:    # SQLite: which quotes are paid, which proofs are spent
   caddy-data:    # Let's Encrypt certificates
   caddy-config:
+  relay-data:    # short-lived payment payloads and order capabilities

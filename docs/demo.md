@@ -1,13 +1,13 @@
 # Running / testing the mint (real world)
 
-The mint is live at **https://mint.strawhatcrew.xyz**. Anyone can use it by pointing a Cashu wallet
+The mint is live at **https://mint.fibernuts.xyz**. Anyone can use it by pointing a Cashu wallet
 at it and paying its Fiber invoices from **their own** Fiber node. To mint you must first connect
 your node to the mint and open an RUSD channel — the mint has no way to credit you until a channel
 carries the payment. This is that flow, end to end.
 
 ## What you need
 
-- **The wallet** — open **https://fibernuts.strawhatcrew.xyz** in a browser. No install. It's already
+- **The wallet** — open **https://fibernuts.xyz** in a browser. No install. It's already
   pointed at the mint.
 - **Your own testnet Fiber node** (`fnn`) holding **RUSD** — this is what pays the mint's invoices.
   There is no consumer Fiber-wallet GUI yet, so you drive the node with `fnn-cli`.
@@ -23,13 +23,18 @@ fnn() { fnn-cli -u <your-node-rpc> "$@"; }     # e.g. http://127.0.0.1:8227
 ## Mint coordinates (paste as-is)
 
 ```sh
-MINT_ADDR="/ip4/192.241.151.135/tcp/8228/p2p/QmViPrRPGD8SFsnXt2X3bd8becn7sc1xpBV1hCooMUsKGH"
-MINT_PUBKEY="02b97fb5bb5e6b60a65ab129065e3d4de16e57a5cc3069ba78164bf7f7e956bc34"
+MINT_ADDR="/ip4/157.230.15.176/tcp/8228/p2p/QmbsNpwt8zpXoTMFg1xDUq5qpNvcdZQfeykbKMY9nd8e1H"
+MINT_PUBKEY="03698c4b37049adb4f28a3eb2aa2a57f0a56cf25959a4d2161df5597f23c7d7d94"
+MINT_CKB_ADDRESS="ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqdy3egfd2s8w505cvtld77scx806ljhducha5aaa"
 RUSD='{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"}'
 ```
 
 Amounts: in the **wallet you type RUSD** (e.g. `1.00`); in **`fnn-cli` you use base units**, where
 `1.00 RUSD = 100_000_000`.
+
+`MINT_CKB_ADDRESS` is only the operator's funding address for channel cells and fees. Do not send
+RUSD there expecting ecash. The node opening the channel must hold the on-chain RUSD; opening the
+channel moves that RUSD into outbound Fiber balance toward the mint.
 
 ## Step 1 — Connect to the mint and open an RUSD channel
 
@@ -91,7 +96,7 @@ Fiber and burns the proofs.
 - **The mint serves anyone.** It credits ecash to whoever pays an invoice it issued — different
   users pay from different nodes. You're not tied to one node; each payer just needs its own RUSD
   channel to the mint.
-- **Sanity check the mint is up:** `curl -s https://mint.strawhatcrew.xyz/v1/info` (returns the
+- **Sanity check the mint is up:** `curl -s https://mint.fibernuts.xyz/v1/info` (returns the
   `fiber`/`rusd` methods).
 - **Melt needs the mint to have outbound RUSD** (which it gains as people mint). If a melt fails with
   `Unit unsupported`, that's cdk's generic label for a failed route — usually the mint's outbound

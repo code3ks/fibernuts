@@ -1,6 +1,7 @@
 import {
   CheckStateEnum,
   hasValidDleq,
+  parseP2PKSecret,
   Mint,
   OutputData,
   Wallet,
@@ -13,6 +14,8 @@ import {
   type MintQuoteBaseResponse,
   type PostRestoreResponse,
   type Proof,
+  type P2PKOptions,
+  type OutputConfig,
   type SerializedBlindedSignature,
   type SerializedOutputData,
   type SwapPreview,
@@ -384,7 +387,18 @@ export class FibernutsWallet {
   }
 
   /** Prepare an outgoing split, using a no-network exact selection whenever possible. */
-  async prepareSend(amount: number, proofs: Proof[]): Promise<PreparedSend> {
+  async prepareSend(amount: number, proofs: Proof[], lock?: P2PKOptions): Promise<PreparedSend> {
+    if (lock) {
+      const outputConfig: OutputConfig = {
+        send: { type: "p2pk", options: lock },
+        keep: { type: "random" },
+      };
+      const preview = await this.wallet.prepareSwapToSend(amount, proofs, { includeFees: true }, outputConfig);
+      const swap = serializeSwapPreview(preview);
+      const sendAmount = sumStoredOutputs(swap.sendOutputs);
+      const debit = sendAmount + swap.fees;
+      return { mode: "swap", swap, debit, fee: debit - amount };
+    }
     try {
       const { send, keep } = this.wallet.sendOffline(amount, proofs, { includeFees: true });
       const debit = sumProofs(send);
@@ -429,8 +443,23 @@ export class FibernutsWallet {
     }
   }
 
-  prepareReceive(token: string): Promise<StoredSwapPreview> {
-    return this.wallet.prepareSwapToReceive(token).then(serializeSwapPreview);
+  prepareReceive(token: string, privateKey?: string): Promise<StoredSwapPreview> {
+    if (!privateKey) return this.wallet.prepareSwapToReceive(token).then(serializeSwapPreview);
+    const inspected = this.inspectToken(token);
+    const signed = this.wallet.signP2PKProofs(inspected.proofs, privateKey);
+    return this.wallet.prepareSwapToReceive(signed).then(serializeSwapPreview);
+  }
+
+  tokenIsLockedTo(token: string, publicKey: string): boolean {
+    const expected = publicKey.toLowerCase();
+    return this.inspectToken(token).proofs.every((proof) => {
+      try {
+        const [kind, condition] = parseP2PKSecret(proof.secret);
+        return kind === "P2PK" && condition.data.toLowerCase() === expected && (condition.tags ?? []).length === 0;
+      } catch {
+        return false;
+      }
+    });
   }
 
   async completePreparedReceive(swap: StoredSwapPreview): Promise<Proof[]> {

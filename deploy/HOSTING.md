@@ -1,15 +1,16 @@
-# Hosting a fibernuts mint
+# Hosting FiberNuts services
 
-This bundle runs the whole mint on one server: the Fiber node, `fibernuts-processor`, a stock
-`cdk-mintd`, and a TLS proxy — four containers, one `docker compose up`.
+This bundle runs the mint and payment relay on one server: the Fiber node,
+`fibernuts-processor`, a stock `cdk-mintd`, the relay, and a TLS proxy. One
+`docker compose up` starts all five services.
 
 ```
-┌──────────────────── your VPS (public IP) ─────────────────────┐
-│  fnn  ──127.0.0.1:8227──  processor  ──127.0.0.1:50051──  mintd │
-│   │                                                        │   │
-└───│────────────────────────────────────────────────────── │ ──┘
-   :8228 (public P2P)          Caddy :443 ──proxy──▶ mintd :8085
-   routing/announcement        https://mint.you.com   (the mint API)
+┌────────────────────── your VPS (public IP) ──────────────────────┐
+│  fnn ──127.0.0.1:8227── processor ──127.0.0.1:50051── mintd     │
+│   │                                                    relay     │
+└───│──────────────────────── Caddy :443 ────────────────┬─────────┘
+   :8228 public P2P        https://mint.you.com          https://pay.you.com
+                           mint API                      payment delivery
 ```
 
 The processor and mintd share the Fiber node's network namespace, so they reach it over
@@ -20,14 +21,14 @@ payments can route to you. Only two ports face the internet: fnn's `8228` and Ca
 
 - A **VPS** with a **public IPv4**. Runtime is light, but the on-server Rust image build is not;
   use 2 vCPU / 4 GB RAM for a straightforward first deployment. Docker + Compose v2 are required.
-- A **domain** (or subdomain) you own, with an **A record** pointing at the VPS IP, e.g.
-  `mint.you.com`. This is *your* domain — you buy/own it; nothing to look up.
+- Two **subdomains** you own, with **A records** pointing at the VPS IP, e.g. `mint.you.com` and
+  `pay.you.com`. The relay uses a separate hostname so its browser-origin boundary stays explicit.
 - Ports **80, 443, 8228** open in the firewall.
 
 ## Before replacing an existing mint
 
 A new hostname is a new Cashu mint identity from a wallet's perspective. Existing tokens encode
-their issuing mint URL, so holders of tokens from `mint.strawhatcrew.xyz` will continue contacting
+their issuing mint URL, so holders of tokens from an earlier mint hostname will continue contacting
 that hostname.
 
 - For a **fresh test mint**, generate a new mnemonic and start with empty volumes.
@@ -75,18 +76,20 @@ dig +short NS fibernuts.xyz
 ```
 
 If that is empty or reports `NXDOMAIN`, finish the domain registration or nameserver delegation at
-the registrar before continuing. Then, at the active DNS provider for `fibernuts.xyz`, create this
-record:
+the registrar before continuing. Then, at the active DNS provider for `fibernuts.xyz`, create both
+records:
 
 | Type | Host | Value | TTL |
 | --- | --- | --- | --- |
 | `A` | `mint` | The Droplet or Reserved IPv4 | `300` while setting up |
+| `A` | `pay` | The same Droplet or Reserved IPv4 | `300` while setting up |
 
 Do not add an `AAAA` record unless the Droplet and Fiber announcement are intentionally configured
 for IPv6. Wait until this prints the expected IPv4 before starting Caddy:
 
 ```sh
 dig +short A mint.fibernuts.xyz
+dig +short A pay.fibernuts.xyz
 ```
 
 ## Prepare the server
@@ -130,24 +133,25 @@ git clone "$REPOSITORY_URL" fibernuts
 
 ## Deploy
 
-You fill in exactly **two** things — your domain and a mnemonic. The server's public IP is
-auto-detected, and the node's key password is auto-generated; you don't touch either.
+Set the mint and relay domains, the exact deployed market origin allowed to call the relay, and the
+mint mnemonic. The server's public IP is auto-detected, and the node's key password is
+auto-generated.
 
 ```sh
 cd fibernuts/deploy
 cp .env.example .env
 nano .env
-# Set MINT_DOMAIN=mint.fibernuts.xyz and MINT_MNEMONIC to a fresh 12-word phrase.
-# The example file has a one-liner to generate one. Everything else is optional.
+# Set MINT_DOMAIN, RELAY_DOMAIN, MARKET_ALLOWED_ORIGINS, and MINT_MNEMONIC.
+# The example file includes the expected shapes and a mnemonic generator.
 chmod 600 .env
 
 sudo docker compose config --quiet
 sudo docker compose up -d --build
 ```
 
-That's it. Compose detects this server's public IP, builds the processor, pulls the fnn and mintd
-images, generates the Fiber node's config (announcing that IP) and a fresh CKB key + key-password on
-first boot, and Caddy fetches a TLS cert for your domain.
+Compose detects this server's public IP, builds the processor and relay, pulls the fnn and mintd
+images, generates the Fiber node's config and a fresh CKB key plus key password on first boot, and
+Caddy fetches TLS certificates for both API domains.
 
 Check it came up:
 
@@ -155,6 +159,8 @@ Check it came up:
 sudo docker compose ps
 curl -fsS https://mint.fibernuts.xyz/v1/info | jq '.nuts["4"].methods'
 # [{"method":"fiber","unit":"rusd","min_amount":1,"max_amount":1000000}]
+curl -fsS https://pay.fibernuts.xyz/healthz | jq
+# {"status":"ok"}
 ```
 
 Confirm the node is announcing publicly (so wallets can route to it):
@@ -164,8 +170,8 @@ sudo docker compose exec fnn fnn-cli --url http://127.0.0.1:8227 info | grep -A2
 # should list /ip4/<YOUR_PUBLIC_IP>/tcp/8228/p2p/<PeerId>
 ```
 
-Do not destroy the Droplet after this check. Record the public Fiber address and peer public key;
-both are required to update `docs/demo.md` for users who will open channels to this node.
+Do not destroy the Droplet after this check. Record the public Fiber address and peer public key for
+operators who will open channels to this node.
 
 ## Point the wallet at the new mint
 
@@ -179,6 +185,10 @@ Do this only after `/v1/info` works and the mint has usable RUSD liquidity:
 
 The mint domain is an API endpoint, not the wallet's public page. Keep Open Graph and canonical URLs
 pointed at the wallet host until a separate `fibernuts.xyz` or `app.fibernuts.xyz` deployment exists.
+
+For the market application, also set `VITE_RELAY_ORIGIN=https://pay.fibernuts.xyz`. Its deployed
+origin must exactly match `MARKET_ALLOWED_ORIGINS` in the server `.env`; the relay deliberately
+rejects browser requests from every other origin.
 
 ## The one thing `compose up` does NOT do: liquidity
 
@@ -207,6 +217,8 @@ liquidity task, not a deployment one.
 - **Back up the `fnn-data` volume** (the CKB key, its auto-generated encryption password, and the
   channel state) and **`mintd-data`** (which quotes were paid, which proofs were spent). Losing
   `fnn-data` loses the node's on-chain funds; losing `mintd-data` corrupts the mint's accounting.
+- Treat `relay-data` as sensitive transient bearer data. Back it up only when required for incident
+  recovery, encrypt that backup, and delete it after the configured retention window.
 - Keep `.env` at `chmod 600` and out of git (`.gitignore` already excludes it).
 
 ## Operating
@@ -214,6 +226,7 @@ liquidity task, not a deployment one.
 ```sh
 sudo docker compose logs -f mintd         # mint activity
 sudo docker compose logs -f processor     # cdk-fiber ↔ node (the only place backend errors surface)
+sudo docker compose logs -f relay         # status and errors; no request access log
 sudo docker compose restart processor     # safe to restart; it reconnects
 sudo docker compose down                  # stop (volumes persist)
 ```
@@ -223,16 +236,18 @@ sudo docker compose down                  # stop (volumes persist)
 | symptom | cause → fix |
 |---|---|
 | `/v1/info` unreachable / no cert | DNS A record not pointing at the VPS yet, or 80/443 blocked. Caddy needs both to issue a cert. `docker compose logs caddy`. |
+| relay returns `origin_forbidden` | `MARKET_ALLOWED_ORIGINS` does not exactly match the browser's scheme and hostname. Update it and recreate the relay container. |
+| relay health check fails | inspect `docker compose logs relay`; verify `relay-data` is writable and `RELAY_DOMAIN` uses the public HTTPS hostname. |
 | node not in the routing graph / nobody can pay | `PUBLIC_IP` wrong or `8228` firewalled. It must be your real public IP and reachable. |
 | mintd exits: `data did not match any variant of untagged enum LnOneOrMany` | a required `[ln]` limit is missing from `mintd.host.toml`. All four min/max are mandatory. |
 | mint quote fails with `Unit unsupported` | that's cdk's generic label for a backend/route failure — read `docker compose logs processor` for the real reason (usually no route / no liquidity). |
 | processor can't reach the node | the `network_mode: service:fnn` link — don't add `ports:` or `networks:` to processor/mintd; Docker rejects it and the loopback link breaks. |
 | build fails: Dockerfile path | your Docker is old; upgrade to Compose v2 / BuildKit, or run the build from the repo root. |
 
-## Not on testnet?
+## Network boundary
 
-Point at mainnet by setting `FIBERNUTS_NETWORK=mainnet` and swapping the RUSD script + fnn `chain`
-to mainnet values — but mainnet RUSD liquidity is a real commitment, so start on testnet.
+This bundle is intentionally fixed to CKB testnet RUSD. It has not been reviewed or configured for
+mainnet value.
 
 ## Reproducible local version
 

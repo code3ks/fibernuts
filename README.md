@@ -71,17 +71,29 @@ hard part, which is acquiring testnet RUSD.
 
 ## Try the live mint
 
-A mint is live on public testnet at **https://mint.strawhatcrew.xyz**, with the wallet at
-**https://fibernuts.strawhatcrew.xyz** — open it and it's already pointed at the mint. Holding,
-sending, and receiving ecash needs nothing but that URL.
+A reference mint is live on public testnet at **https://mint.fibernuts.xyz**, with the wallet at
+**https://fibernuts.xyz**. The wallet is already pointed at the reference mint. Holding, sending,
+and receiving ecash needs nothing but the wallet; minting and melting additionally require a
+routable RUSD channel.
+
+The reference mint's public coordinates are:
+
+```sh
+MINT_URL="https://mint.fibernuts.xyz"
+MINT_ADDR="/ip4/157.230.15.176/tcp/8228/p2p/QmbsNpwt8zpXoTMFg1xDUq5qpNvcdZQfeykbKMY9nd8e1H"
+MINT_PUBKEY="03698c4b37049adb4f28a3eb2aa2a57f0a56cf25959a4d2161df5597f23c7d7d94"
+MINT_CKB_ADDRESS="ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqdy3egfd2s8w505cvtld77scx806ljhducha5aaa"
+```
+
+`MINT_CKB_ADDRESS` funds the mint operator's side of Fiber channel cells and fees. It is not a
+Cashu deposit address: sending CKB or RUSD to it does not issue ecash.
 
 To **mint** (deposit RUSD) you pay the mint's Fiber invoice from your own Fiber node, so first
-connect your node to the mint and open an RUSD channel (the mint auto-accepts channels ≥ 10 RUSD):
+fund your node with testnet CKB and on-chain RUSD, then open a public RUSD channel from that node
+into the mint. The mint auto-accepts RUSD channels ≥ 10 RUSD:
 
 ```sh
 fnn() { fnn-cli -u <your-node-rpc> "$@"; }
-MINT_ADDR="/ip4/192.241.151.135/tcp/8228/p2p/QmViPrRPGD8SFsnXt2X3bd8becn7sc1xpBV1hCooMUsKGH"
-MINT_PUBKEY="02b97fb5bb5e6b60a65ab129065e3d4de16e57a5cc3069ba78164bf7f7e956bc34"   
 RUSD='{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"}'
 
 fnn peer connect_peer --address "$MINT_ADDR"

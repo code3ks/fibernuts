@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createBlindSignature,
   createNewMintKeys,
-  deriveKeysetId,
+  createP2PKsecret,
+  createRandomSecretKey,
+  getPubKeyFromPrivKey,
   OutputData,
   pointFromHex,
   serializeMintKeys,
@@ -71,10 +73,68 @@ describe("wallet amount helpers", () => {
     expect(prepared).toMatchObject({ mode: "offline", debit: 1024, fee: 1 });
   });
 
+  it("forces a swap when creating vendor-key-locked proofs", async () => {
+    const wallet = new FibernutsWallet("https://mint.example");
+    const source = [{ amount: 512, id: "keyset", secret: "source", C: `02${"11".repeat(32)}` }];
+    const preview = {
+      amount: 250,
+      fees: 1,
+      keysetId: "keyset",
+      inputs: source,
+      sendOutputs: [{ blindedMessage: { amount: "250", B_: "send", id: "keyset" }, blindingFactor: 1n, secret: new Uint8Array([1]) }],
+      keepOutputs: [{ blindedMessage: { amount: "261", B_: "keep", id: "keyset" }, blindingFactor: 2n, secret: new Uint8Array([2]) }],
+      unselectedProofs: [],
+    };
+    const cashuWallet = {
+      sendOffline: vi.fn(() => { throw new Error("must not use offline proofs"); }),
+      prepareSwapToSend: vi.fn(async () => preview),
+    };
+    (wallet as unknown as { wallet: typeof cashuWallet }).wallet = cashuWallet;
+
+    const lock = { pubkey: `02${"22".repeat(32)}` };
+    const prepared = await wallet.prepareSend(250, source as never, lock);
+
+    expect(cashuWallet.sendOffline).not.toHaveBeenCalled();
+    expect(cashuWallet.prepareSwapToSend).toHaveBeenCalledWith(
+      250,
+      source,
+      { includeFees: true },
+      { send: { type: "p2pk", options: lock }, keep: { type: "random" } },
+    );
+    expect(prepared).toMatchObject({ mode: "swap", debit: 251, fee: 1 });
+  });
+
+  it("rejects a token with extra P2PK spending paths", () => {
+    const wallet = new FibernutsWallet("https://mint.example");
+    const privateKey = createRandomSecretKey();
+    const publicKey = Buffer.from(getPubKeyFromPrivKey(privateKey)).toString("hex");
+    const proof = (secret: string) => ({
+      amount: 1,
+      id: "009a1f293253e41e",
+      secret,
+      C: `02${"11".repeat(32)}`,
+    });
+    const exactProof = proof(createP2PKsecret(publicKey));
+    const refundableProof = proof(createP2PKsecret(publicKey, [["locktime", "1800000000"], ["refund", publicKey]]));
+    vi.spyOn(wallet, "inspectToken").mockImplementation((token) => ({
+      amount: 1,
+      mint: "https://mint.example",
+      unit: "rusd",
+      proofs: [token === "exact" ? exactProof : refundableProof] as never,
+    }));
+
+    expect(wallet.tokenIsLockedTo("exact", publicKey)).toBe(true);
+    expect(wallet.tokenIsLockedTo("refundable", publicKey)).toBe(false);
+  });
+
   it("returns only newly issued change after an online send", async () => {
     const wallet = new FibernutsWallet("https://mint.example");
     const point = `02${"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}`;
-    const keysetId = deriveKeysetId({ "1": point, "2": point, "4": point }, { unit: "rusd" });
+    const pair = createNewMintKeys(4, new Uint8Array(32).fill(9), { unit: "rusd" });
+    const keyset = { id: pair.keysetId, keys: serializeMintKeys(pair.pubKeys) };
+    const keysetId = pair.keysetId;
+    const [changeOutput] = OutputData.createRandomData(1, keyset);
+    const [sendOutput] = OutputData.createRandomData(2, keyset);
     const freshChange = { amount: 1, id: keysetId, secret: "fresh", C: point };
     const staleUnselected = { amount: 4, id: keysetId, secret: "old", C: point };
     const sent = { amount: 2, id: keysetId, secret: "sent", C: point };
@@ -88,8 +148,8 @@ describe("wallet amount helpers", () => {
       fees: 0,
       keysetId,
       inputs: [],
-      keepOutputs: [{ blindedMessage: { amount: "1", B_: "blind-change", id: keysetId }, blindingFactor: "1", secret: "01" }],
-      sendOutputs: [{ blindedMessage: { amount: "2", B_: "blind-send", id: keysetId }, blindingFactor: "2", secret: "02" }],
+      keepOutputs: [OutputData.serialize(changeOutput)],
+      sendOutputs: [OutputData.serialize(sendOutput)],
       unselectedProofs: [staleUnselected] as never,
     } as never);
 

@@ -3,6 +3,7 @@ import {
   createBlindSignature,
   deriveKeysetId,
   getEncodedToken,
+  getPubKeyFromPrivKey,
   PaymentRequest,
   pointFromHex,
 } from "@cashu/cashu-ts";
@@ -36,17 +37,24 @@ async function expectNoHorizontalOverflow(page: Page) {
 }
 
 async function mockCompatibleMint(page: Page, inputFeePpk = 0, proofState: "UNSPENT" | "PENDING" | "SPENT" = "UNSPENT") {
-  const key = `02${"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}`;
-  const keys = Object.fromEntries(Array.from({ length: 20 }, (_, index) => [String(2 ** index), key]));
+  const privateKeys = new Map<string, Uint8Array>();
+  const keys = Object.fromEntries(Array.from({ length: 20 }, (_, index) => {
+    const amount = String(2 ** index);
+    const privateKey = new Uint8Array(32);
+    privateKey[31] = index + 1;
+    privateKeys.set(amount, privateKey);
+    const publicKey = Array.from(getPubKeyFromPrivKey(privateKey), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return [amount, publicKey];
+  }));
   const keyset = {
     id: deriveKeysetId(keys, { unit: "rusd", input_fee_ppk: inputFeePpk }),
     unit: "rusd",
     keys,
   };
   const signOutputs = (outputs: Array<{ amount: number | string; B_: string; id: string }> = []) => {
-    const privateKey = new Uint8Array(32);
-    privateKey[31] = 1;
     return outputs.map((output) => {
+      const privateKey = privateKeys.get(String(output.amount));
+      if (!privateKey) throw new Error(`Synthetic mint has no key for denomination ${String(output.amount)}`);
       const signature = createBlindSignature(pointFromHex(output.B_), privateKey, output.id);
       return { id: output.id, amount: output.amount, C_: signature.C_.toHex(true) };
     });
@@ -58,7 +66,7 @@ async function mockCompatibleMint(page: Page, inputFeePpk = 0, proofState: "UNSP
       await route.fulfill({
         json: {
           name: "CKB Meetup Test Mint",
-          pubkey: key,
+          pubkey: keys["1"],
           version: "mock/1.0",
           description: "Synthetic browser-test mint",
           contact: [],
@@ -179,11 +187,11 @@ test("publishes complete branded sharing metadata", async ({ page }) => {
   await expect(page).toHaveTitle("FiberNuts | RUSD ecash over Fiber");
   await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
     "href",
-    "https://fibernuts.strawhatcrew.xyz/",
+    "https://fibernuts.xyz/",
   );
   await expect(page.locator('meta[property="og:image"]')).toHaveAttribute(
     "content",
-    "https://fibernuts.strawhatcrew.xyz/social-card.png",
+    "https://fibernuts.xyz/social-card.png",
   );
   await expect(page.locator('meta[property="og:image:alt"]')).toHaveAttribute("content", /FiberNuts RUSD ecash wallet/);
   await expect(page.locator('meta[name="twitter:card"]')).toHaveAttribute("content", "summary_large_image");

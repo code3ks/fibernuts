@@ -1,7 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { PaymentRequest } from "@cashu/cashu-ts";
+import {
+  PaymentRequest,
+  PaymentRequestTransportType,
+  createP2PKsecret,
+  createRandomSecretKey,
+  getPubKeyFromPrivKey,
+  isP2PKSpendAuthorised,
+  signP2PKProof,
+} from "@cashu/cashu-ts";
 
-import { createPaymentRequest, decodePaymentRequest, normalizeMintUrl, validatePaymentRequest } from "./payment-request";
+import {
+  createPaymentRequest,
+  decodePaymentRequest,
+  normalizeMintUrl,
+  paymentRequestLock,
+  postTransport,
+  validatePaymentRequest,
+} from "./payment-request";
 
 describe("Cashu payment requests", () => {
   it("round-trips the meetup payment through NUT-18", () => {
@@ -54,5 +69,38 @@ describe("Cashu payment requests", () => {
     ).toEncodedRequest();
 
     expect(() => decodePaymentRequest(encoded)).toThrow(/no request ID/i);
+  });
+
+  it("round-trips POST delivery and the vendor P2PK lock", () => {
+    const privateKey = createRandomSecretKey();
+    const publicKey = Buffer.from(getPubKeyFromPrivKey(privateKey)).toString("hex");
+    const request = createPaymentRequest(250, "rusd", "https://mint.example", "Block Cafe - Coffee", {
+      id: "order_1234567890abcdef",
+      transport: [{
+        type: PaymentRequestTransportType.POST,
+        target: `https://pay.example/v1/deliver/${"w".repeat(43)}`,
+        tags: [["expires_at", "1800000300"]],
+      }],
+      nut10: { kind: "P2PK", data: publicKey, tags: [] },
+    });
+    const decoded = decodePaymentRequest(request.encoded);
+
+    expect(postTransport(decoded)?.target).toBe(`https://pay.example/v1/deliver/${"w".repeat(43)}`);
+    expect(paymentRequestLock(decoded)?.pubkey).toBe(publicKey);
+    expect(decoded.nut10).toEqual({ kind: "P2PK", data: publicKey, tags: [] });
+  });
+
+  it("requires the vendor key to authorize a P2PK proof", () => {
+    const privateKey = createRandomSecretKey();
+    const publicKey = Buffer.from(getPubKeyFromPrivKey(privateKey)).toString("hex");
+    const proof = {
+      amount: 1,
+      id: "00synthetic",
+      secret: createP2PKsecret(publicKey),
+      C: `02${"11".repeat(32)}`,
+    };
+
+    expect(isP2PKSpendAuthorised(proof as never)).toBe(false);
+    expect(isP2PKSpendAuthorised(signP2PKProof(proof as never, privateKey))).toBe(true);
   });
 });

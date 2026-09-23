@@ -23,7 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: mint
-      - run: make ci
+      - run: make mint-ci
 
   wallet:
     runs-on: ubuntu-latest
@@ -31,5 +31,43 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: make wallet-build
+          node-version: 24
+          cache: npm
+          cache-dependency-path: wallet/package-lock.json
+      - run: npm ci
+        working-directory: wallet
+      - run: npx playwright install --with-deps chrome
+        working-directory: wallet
+      - run: make wallet-ci
+
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+        working-directory: relay
+      - run: make relay-ci
+
+  market:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            market/package-lock.json
+            wallet/package-lock.json
+      - run: npm ci
+        working-directory: wallet
+      - run: npm ci
+        working-directory: market
+      - run: npx playwright install --with-deps chrome
+        working-directory: market
+      - run: make market-ci

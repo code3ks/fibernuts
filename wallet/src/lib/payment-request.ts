@@ -1,4 +1,10 @@
-import { PaymentRequest } from "@cashu/cashu-ts";
+import {
+  PaymentRequest,
+  PaymentRequestTransportType,
+  type NUT10Option,
+  type PaymentRequestTransport,
+  type P2PKOptions,
+} from "@cashu/cashu-ts";
 
 import { units } from "./wallet";
 
@@ -9,7 +15,15 @@ export interface DecodedPaymentRequest {
   mints: string[];
   description: string;
   singleUse: boolean;
+  transport?: PaymentRequestTransport[];
+  nut10?: NUT10Option;
   encoded: string;
+}
+
+export interface PaymentRequestOptions {
+  id?: string;
+  transport?: PaymentRequestTransport[];
+  nut10?: NUT10Option;
 }
 
 function requestId(): string {
@@ -41,11 +55,21 @@ export function createPaymentRequest(
   unit: string,
   mintUrl: string,
   description: string,
+  options: PaymentRequestOptions = {},
 ): DecodedPaymentRequest {
-  const id = requestId();
+  const id = options.id ?? requestId();
   const normalizedMint = normalizeMintUrl(mintUrl);
   const normalizedUnit = unit.toLowerCase();
-  const request = new PaymentRequest(undefined, id, amount, normalizedUnit, [normalizedMint], description, true);
+  const request = new PaymentRequest(
+    options.transport,
+    id,
+    amount,
+    normalizedUnit,
+    [normalizedMint],
+    description,
+    true,
+    options.nut10,
+  );
   const encoded = request.toEncodedRequest();
 
   return {
@@ -55,6 +79,8 @@ export function createPaymentRequest(
     mints: [normalizedMint],
     description,
     singleUse: true,
+    transport: options.transport ?? [],
+    nut10: options.nut10,
     encoded,
   };
 }
@@ -90,8 +116,18 @@ export function decodePaymentRequest(encoded: string): DecodedPaymentRequest {
     mints: (request.mints ?? []).map(normalizeMintUrl),
     description: request.description?.trim() || "Payment",
     singleUse: request.singleUse,
+    transport: request.transport ?? [],
+    nut10: request.nut10,
     encoded: value,
   };
+}
+
+export function postTransport(request: DecodedPaymentRequest): PaymentRequestTransport | undefined {
+  return request.transport?.find((transport) => transport.type === PaymentRequestTransportType.POST);
+}
+
+export function paymentRequestLock(request: DecodedPaymentRequest): P2PKOptions | undefined {
+  return PaymentRequest.fromEncodedRequest(request.encoded).toP2PKOptions();
 }
 
 export function validatePaymentRequest(

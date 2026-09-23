@@ -206,7 +206,7 @@ const socialCard = `
             </div>
           </section>
         </main>
-        <footer class="footer"><strong>fibernuts.strawhatcrew.xyz</strong><span>BOUNDED CUSTODIAL TRUST</span></footer>
+        <footer class="footer"><strong>fibernuts.xyz</strong><span>BOUNDED CUSTODIAL TRUST</span></footer>
       </div>
     </body>
   </html>
