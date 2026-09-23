@@ -35,8 +35,9 @@ Vite embeds these values at build time. Changing them requires a new deployment.
 
 Create a Vercel project with this repository and set **Root Directory** to `market`. Keep the
 detected framework as Vite, then add all four variables from `.env.example` to Production and
-Preview as appropriate. The included `vercel.json` builds `dist`, preserves the direct `/vendor`
-entry route, and applies baseline browser security headers.
+Preview as appropriate. The included `vercel.json` installs the shared wallet and market lockfiles,
+builds `dist`, preserves the direct `/vendor` entry route, and applies baseline browser security
+headers.
 
 The production relay must allow the exact deployed browser origin through
 `FIBERNUTS_RELAY_ALLOWED_ORIGINS`. Do not use a wildcard origin: relay URLs contain bearer
