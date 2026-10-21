@@ -9,7 +9,7 @@ const PAYMENT_HASH = `0x${"66".repeat(32)}`;
 const QUOTE_PUBKEY = `03${"77".repeat(32)}`;
 const RUSD_CODE_HASH = "1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a";
 const RUSD_ARGS = "878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b";
-const PACKED_RUSD_SCRIPT = `0x55000000100000003000000031000000${RUSD_CODE_HASH}0124000000${RUSD_ARGS}`;
+const PACKED_RUSD_SCRIPT = `0x55000000100000003000000031000000${RUSD_CODE_HASH}0120000000${RUSD_ARGS}`;
 
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];

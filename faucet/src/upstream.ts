@@ -84,8 +84,9 @@ function decodePackedScript(value: unknown): FiberUdtScript {
       total !== bytes.length || codeHashOffset !== 16 ||
       hashTypeOffset - codeHashOffset !== 32 || argsOffset - hashTypeOffset !== 1
     ) throw new Error("invalid script table");
-    const argsTotal = readUint32(bytes, argsOffset);
-    if (argsOffset + argsTotal !== bytes.length || argsTotal < 4) throw new Error("invalid script args");
+    // Molecule Bytes stores the payload length; the four-byte prefix is not part of that count.
+    const argsLength = readUint32(bytes, argsOffset);
+    if (argsOffset + 4 + argsLength !== bytes.length) throw new Error("invalid script args");
     const hashTypes = ["data", "type", "data1", undefined, "data2"] as const;
     const hashType = hashTypes[bytes[hashTypeOffset]];
     if (!hashType) throw new Error("invalid script hash type");

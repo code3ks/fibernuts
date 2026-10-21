@@ -1,5 +1,6 @@
 import {
   CalendarDays,
+  HandCoins,
   Landmark,
   ListOrdered,
   ReceiptText,
@@ -14,10 +15,19 @@ import type { ReactNode } from "react";
 import type { MarketConnectionStatus } from "../hooks/useMarket";
 import type { MarketRole } from "../domain/types";
 import { EVENT } from "../event/manifest";
+import { Button } from "./Primitives";
 
 export type AttendeeScreen = "event" | "pay" | "cash" | "activity";
 export type VendorScreen = "sell" | "order" | "orders" | "cash";
 export type MarketScreen = AttendeeScreen | VendorScreen;
+
+export interface BalanceAction {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  busy?: boolean;
+  title?: string;
+}
 
 interface NavItem {
   id: MarketScreen;
@@ -63,6 +73,7 @@ export function Shell({
   status,
   mintName,
   balance,
+  balanceAction,
   toast,
   children,
   onNavigate,
@@ -72,6 +83,7 @@ export function Shell({
   status: MarketConnectionStatus;
   mintName: string;
   balance: string;
+  balanceAction?: BalanceAction;
   toast: string | null;
   children: ReactNode;
   onNavigate: (screen: MarketScreen) => void;
@@ -116,7 +128,22 @@ export function Shell({
           </header>
           <header className="desktop-header">
             <div><span className="eyebrow">{role === "attendee" ? "Attendee" : "Vendor"}</span><h2>{TITLE[screen]}</h2></div>
-            <div className="desktop-header__balance"><span>Spendable</span><strong>{balance} RUSD</strong></div>
+            <div className="desktop-header__wallet">
+              <div className="desktop-header__balance"><span>Spendable</span><strong>{balance} RUSD</strong></div>
+              {balanceAction ? (
+                <Button
+                  className="desktop-header__claim"
+                  variant="secondary"
+                  icon={HandCoins}
+                  disabled={balanceAction.disabled}
+                  busy={balanceAction.busy}
+                  title={balanceAction.title}
+                  onClick={balanceAction.onClick}
+                >
+                  {balanceAction.label}
+                </Button>
+              ) : null}
+            </div>
           </header>
           <main className="screen" id="main-content">{children}</main>
           <nav className="mobile-nav" aria-label={`${role} navigation`}>

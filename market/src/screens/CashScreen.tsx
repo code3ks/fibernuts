@@ -11,7 +11,7 @@ import type { CashOutReview } from "../domain/market-runtime";
 import { EVENT } from "../event/manifest";
 import type { MarketController } from "../hooks/useMarket";
 
-type CashMode = "overview" | "claim" | "add" | "cashout";
+export type CashMode = "overview" | "claim" | "add" | "cashout";
 
 function cashTone(operation: MarketController["snapshot"]["addCash"][number] | CashOutOperation) {
   if (operation.state === "settled" || operation.state === "paid") return "settled" as const;
@@ -33,8 +33,8 @@ function cashLabel(operation: MarketController["snapshot"]["addCash"][number] | 
   return operation.state.replaceAll("_", " ");
 }
 
-export function CashScreen({ market }: { market: MarketController }) {
-  const [mode, setMode] = useState<CashMode>("overview");
+export function CashScreen({ market, initialMode = "overview" }: { market: MarketController; initialMode?: CashMode }) {
+  const [mode, setMode] = useState<CashMode>(initialMode);
   const [selectedOperationId, setSelectedOperationId] = useState<string | null>(null);
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: "auto" });

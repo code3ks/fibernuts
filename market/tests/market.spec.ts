@@ -27,6 +27,7 @@ interface SharedServices {
   mintPayloadSignature?: string;
   faucetQuoteIds?: string[];
   faucetFailure?: boolean;
+  faucetEnabled?: boolean;
 }
 
 const uncaughtErrors = new WeakMap<Page, string[]>();
@@ -83,7 +84,7 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
       if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors(route) });
       if (path === "/v1/config" && request.method() === "GET") {
         return route.fulfill({ headers: cors(route), json: {
-          enabled: true,
+          enabled: shared.faucetEnabled ?? true,
           amount: 1000,
           unit: "rusd",
           network: "testnet",
@@ -319,10 +320,13 @@ for (const viewport of viewports) {
     await mockServices(page.context(), shared);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/");
-    const navigation = viewport.width >= 920 ? page.locator(".sidebar") : page.locator(".mobile-nav");
-    await navigation.getByRole("button", { name: "Cash" }).click();
-    const claimAction = page.getByRole("button", { name: /Claim test RUSD/ });
+    await expect(page.locator(".balance-receipt__amount strong")).toHaveText("0.00");
+    const claimAction = viewport.width >= 920
+      ? page.locator(".desktop-header").getByRole("button", { name: "Claim 10.00 test RUSD" })
+      : page.locator(".balance-receipt").getByRole("button", { name: "Claim 10.00 test RUSD" });
     await expect(claimAction).toBeEnabled();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: testInfo.outputPath(`claim-entry-${viewport.name}.png`), fullPage: true, animations: "disabled" });
     await claimAction.click();
     const heading = page.getByRole("heading", { name: "Claim 10.00 test RUSD" });
     await expect(heading).toBeVisible();
@@ -358,8 +362,7 @@ test("an attendee claims browser-locked test RUSD and recovers the settled activ
   await mockServices(page.context(), shared);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
-  await page.locator(".mobile-nav").getByRole("button", { name: "Cash" }).click();
-  await page.getByRole("button", { name: /Claim test RUSD/ }).click();
+  await page.locator(".balance-receipt").getByRole("button", { name: "Claim 10.00 test RUSD" }).click();
   const confirm = page.getByRole("button", { name: "Claim 10.00 RUSD" });
   await confirm.focus();
   await expect(confirm).toBeFocused();
@@ -396,8 +399,7 @@ test("a payer failure preserves the locked invoice as a recoverable manual fallb
   await mockServices(page.context(), shared);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
-  await page.locator(".mobile-nav").getByRole("button", { name: "Cash" }).click();
-  await page.getByRole("button", { name: /Claim test RUSD/ }).click();
+  await page.locator(".balance-receipt").getByRole("button", { name: "Claim 10.00 test RUSD" }).click();
   await page.getByRole("button", { name: "Claim 10.00 RUSD" }).click();
 
   await expect(page.getByText("Fiber payment needs attention")).toBeVisible();
@@ -412,6 +414,27 @@ test("a payer failure preserves the locked invoice as a recoverable manual fallb
     return stored.addCash?.[0]?.state;
   });
   expect(storedState).toBe("recoverable");
+});
+
+test("zero balance falls back to normal Fiber funding when community claims are paused", async ({ page }) => {
+  const shared: SharedServices = {
+    payload: null,
+    orderId: null,
+    vendorSettled: false,
+    acknowledged: false,
+    faucetEnabled: false,
+  };
+  await mockServices(page.context(), shared);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto("/");
+
+  const fallback = page.locator(".balance-receipt").getByRole("button", { name: "Add cash with Fiber" });
+  await expect(fallback).toBeEnabled();
+  await expect(page.locator(".balance-receipt").getByRole("button", { name: /Claim/ })).toHaveCount(0);
+  await fallback.click();
+  await expect(page.locator(".screen-heading h1")).toHaveText("0.00 RUSD ecash");
+  await expect(page.getByText("Community claims unavailable")).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 });
 
 test("vendor and attendee complete one locked POST payment in isolated browser contexts", async ({ browser }, testInfo) => {
