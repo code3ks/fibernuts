@@ -2,6 +2,7 @@ import type { PaymentRequestPayload, Proof } from "@cashu/cashu-ts";
 import { describe, expect, it, vi } from "vitest";
 
 import type { StoredSwapPreview } from "@wallet-domain/operations";
+import type { MintQuote } from "@wallet-lib/wallet";
 
 import { EVENT } from "../event/manifest";
 import { RelayError } from "./relay";
@@ -49,6 +50,7 @@ function wallet(overrides: Partial<MarketWallet> = {}): MarketWallet {
     completePreparedReceive: vi.fn(async () => [proof(250, "fresh-vendor-proof")]),
     checkTokenState: vi.fn(async () => "unspent"),
     requestMint: vi.fn(),
+    requestLockedMint: vi.fn(),
     checkMintQuote: vi.fn(),
     prepareMint: vi.fn(),
     completeMint: vi.fn(),
@@ -76,6 +78,126 @@ function relay(overrides: Partial<RelayPort> = {}): RelayPort {
 const coffee: OrderItem[] = [{ itemId: "coffee", label: "Coffee", quantity: 1, unitPrice: 250 }];
 
 describe("market runtime persistence boundaries", () => {
+  it("persists a browser-locked faucet quote before issuance and clears the raw key after signing", async () => {
+    const store = state("attendee");
+    const privateKey = "11".repeat(32);
+    const publicKey = `02${"22".repeat(32)}`;
+    const lockedQuote = {
+      quote: "locked-quote-1",
+      request: "fibt1lockedtestinvoice",
+      amount: 1000,
+      amount_paid: 0,
+      amount_issued: 0,
+      unit: "rusd",
+      state: "UNPAID" as const,
+      expiry: 2_000_000_000,
+      pubkey: publicKey,
+    } as unknown as MintQuote;
+    const prepareMint = vi.fn(async (_quote, receivedPrivateKey?: string) => {
+      expect(receivedPrivateKey).toBe(privateKey);
+      expect(store.get().addCash[0].quotePrivateKey).toBe(privateKey);
+      return { outputData: [], keysetId: "synthetic_keyset", payloadSignature: "signed-payload" };
+    });
+    const completeMint = vi.fn(async () => {
+      expect(store.get().addCash[0].state).toBe("issuing");
+      expect(store.get().addCash[0].quotePrivateKey).toBeUndefined();
+      return [proof(1000, "fresh-faucet-proof")];
+    });
+    const runtime = new MarketRuntime({
+      manifest: EVENT,
+      vendor: EVENT.vendors[0],
+      wallet: wallet({
+        requestLockedMint: vi.fn(async () => ({ quote: lockedQuote, privateKey, publicKey })),
+        checkMintQuote: vi.fn(async () => ({ ...lockedQuote, state: "PAID", amount_paid: 1000 } as unknown as MintQuote)),
+        prepareMint,
+        completeMint,
+      }),
+      getSnapshot: store.get,
+      commit: store.commit,
+    });
+
+    const created = await runtime.requestTestCash(1000);
+    expect(created.fundingSource).toBe("faucet");
+    expect(created.quotePrivateKey).toBe(privateKey);
+    expect(store.get().proofs).toHaveLength(0);
+
+    const settled = await runtime.refreshAddCash(created);
+    expect(settled.state).toBe("settled");
+    expect(settled.quotePrivateKey).toBeUndefined();
+    expect(store.get().proofs).toHaveLength(1);
+    expect(prepareMint).toHaveBeenCalledOnce();
+    expect(completeMint).toHaveBeenCalledOnce();
+  });
+
+  it("does not issue a sponsored quote when the mint omits its browser lock", async () => {
+    const store = state("attendee");
+    const privateKey = "11".repeat(32);
+    const publicKey = `02${"22".repeat(32)}`;
+    const lockedQuote = {
+      quote: "locked-quote-2",
+      request: "fibt1lockedtestinvoice",
+      amount: 1000,
+      unit: "rusd",
+      state: "UNPAID" as const,
+      expiry: 2_000_000_000,
+      pubkey: publicKey,
+    } as unknown as MintQuote;
+    const prepareMint = vi.fn();
+    const runtime = new MarketRuntime({
+      manifest: EVENT,
+      vendor: EVENT.vendors[0],
+      wallet: wallet({
+        requestLockedMint: vi.fn(async () => ({ quote: lockedQuote, privateKey, publicKey })),
+        checkMintQuote: vi.fn(async () => ({ ...lockedQuote, state: "PAID", pubkey: undefined } as unknown as MintQuote)),
+        prepareMint,
+      }),
+      getSnapshot: store.get,
+      commit: store.commit,
+    });
+
+    const created = await runtime.requestTestCash(1000);
+    const checked = await runtime.refreshAddCash(created);
+
+    expect(checked.state).toBe("recoverable");
+    expect(checked.error).toMatch(/expected browser lock/i);
+    expect(checked.quotePrivateKey).toBe(privateKey);
+    expect(prepareMint).not.toHaveBeenCalled();
+    expect(store.get().proofs).toHaveLength(0);
+  });
+
+  it("persists a community payer failure as recoverable", async () => {
+    const store = state("attendee");
+    const runtime = new MarketRuntime({
+      manifest: EVENT,
+      vendor: EVENT.vendors[0],
+      wallet: wallet(),
+      getSnapshot: store.get,
+      commit: store.commit,
+    });
+    const operation = {
+      id: "failed-claim",
+      kind: "add" as const,
+      state: "awaiting_payment" as const,
+      amount: 1000,
+      createdAt: 1,
+      updatedAt: 1,
+      mintUrl: EVENT.mintUrl,
+      unit: EVENT.unit,
+      quoteId: "failed-quote",
+      invoice: "fibt1failedquote",
+      fundingSource: "faucet" as const,
+      quotePubkey: `02${"22".repeat(32)}`,
+      quotePrivateKey: "11".repeat(32),
+    };
+    store.commit({ ...store.get(), addCash: [operation] });
+
+    const failed = runtime.recordTestCashPayerFailure(operation, "The Fiber payment failed.");
+
+    expect(failed.state).toBe("recoverable");
+    expect(failed.error).toBe("The Fiber payment failed.");
+    expect(store.get().proofs).toHaveLength(0);
+  });
+
   it("persists vendor keys and the order before registering its relay slot", async () => {
     const store = state("vendor");
     const register = vi.fn(async () => {

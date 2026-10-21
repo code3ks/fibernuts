@@ -32,6 +32,9 @@ export interface EventManifest {
     mode: "post_p2pk";
     relayOrigin: string;
   };
+  faucet: {
+    origin: string;
+  };
   vendors: VendorManifest[];
 }
 
@@ -65,7 +68,7 @@ export function validateEventManifest(input: unknown): EventManifest {
   record(input, "Event manifest");
   exactKeys(input, [
     "schemaVersion", "id", "name", "description", "venue", "network", "networkLabel", "unit",
-    "mintUrl", "assetTypeScript", "paymentTransport", "vendors",
+    "mintUrl", "assetTypeScript", "paymentTransport", "faucet", "vendors",
   ], "Event manifest");
   const manifest = input as unknown as EventManifest;
   if (![manifest.id, manifest.name, manifest.description, manifest.venue, manifest.networkLabel, manifest.mintUrl]
@@ -92,6 +95,10 @@ export function validateEventManifest(input: unknown): EventManifest {
   const mintUrl = normalizedUrl(manifest.mintUrl, "Mint URL");
   const relayOrigin = normalizedUrl(manifest.paymentTransport.relayOrigin, "Relay origin");
   if (new URL(relayOrigin).pathname !== "/") throw new Error("Relay origin must not contain a path.");
+  record(manifest.faucet, "Faucet");
+  exactKeys(manifest.faucet, ["origin"], "Faucet");
+  const faucetOrigin = normalizedUrl(manifest.faucet.origin, "Faucet origin");
+  if (new URL(faucetOrigin).pathname !== "/") throw new Error("Faucet origin must not contain a path.");
   if (!Array.isArray(manifest.vendors) || manifest.vendors.length === 0) {
     throw new Error("The event must configure at least one vendor.");
   }
@@ -126,6 +133,7 @@ export function validateEventManifest(input: unknown): EventManifest {
     ...manifest,
     mintUrl,
     paymentTransport: { ...manifest.paymentTransport, relayOrigin },
+    faucet: { origin: faucetOrigin },
   };
 }
 
@@ -149,6 +157,9 @@ export const EVENT = validateEventManifest({
   paymentTransport: {
     mode: "post_p2pk",
     relayOrigin: import.meta.env.VITE_RELAY_ORIGIN ?? (local ? "http://127.0.0.1:8090" : "https://pay.fibernuts.xyz"),
+  },
+  faucet: {
+    origin: import.meta.env.VITE_FAUCET_ORIGIN ?? (local ? "http://127.0.0.1:8091" : "https://claim.fibernuts.xyz"),
   },
   vendors: [{
     id: "block-cafe",

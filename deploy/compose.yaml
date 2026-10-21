@@ -1,7 +1,8 @@
-# fibernuts — the hosted mint and payment relay on one box.
+# fibernuts — the hosted mint, payment relay, and bounded testnet claim service on one box.
 #
 #   fnn (Fiber node) ── loopback ── fibernuts-processor ── loopback ── cdk-mintd
-#   plus an isolated payment relay; Caddy terminates TLS for both public APIs.
+#   faucet-fnn (separate payer node) ── loopback ── faucet
+#   plus an isolated payment relay; Caddy terminates TLS for the three public HTTP APIs.
 #
 # The processor and mintd join fnn's network namespace (`network_mode: service:fnn`) so all three
 # reach each other on 127.0.0.1 — which keeps fnn's RPC private (no biscuit auth needed) while its
@@ -23,12 +24,14 @@ services:
         for u in https://api.ipify.org https://ifconfig.me https://icanhazip.com; do
           ip=$$(wget -qO- "$$u" 2>/dev/null | tr -d '[:space:]'); [ -n "$$ip" ] && break
         done
-        printf '%s' "$${PUBLIC_IP:-$$ip}" > /fiber/public_ip
-        echo "[ipinit] public IP: $$(cat /fiber/public_ip)"
+        printf '%s' "$${PUBLIC_IP:-$$ip}" > /mint/public_ip
+        printf '%s' "$${PUBLIC_IP:-$$ip}" > /faucet/public_ip
+        echo "[ipinit] public IP: $$(cat /mint/public_ip)"
     environment:
       PUBLIC_IP: ${PUBLIC_IP:-}      # optional override; normally auto-detected
     volumes:
-      - fnn-data:/fiber
+      - fnn-data:/mint
+      - faucet-fnn-data:/faucet
     networks: [mintnet]
     restart: "no"
 
@@ -47,6 +50,34 @@ services:
       - ./fnn-entrypoint.sh:/fnn-entrypoint.sh:ro
     ports:
       - "8228:8228"       # Fiber P2P — public, required for routing/announcement
+    networks: [mintnet]
+    depends_on:
+      ipinit:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "fnn-cli", "--url", "http://127.0.0.1:8227", "info"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ── a separate payer node for fixed community testnet claims ────────────────
+  faucet-fnn:
+    image: nervos/fiber:0.9.0-rc7
+    entrypoint: ["/bin/sh", "/fnn-entrypoint.sh"]
+    environment:
+      FIBER_SECRET_KEY_PASSWORD: ${FAUCET_FIBER_SECRET_KEY_PASSWORD:-}
+      PUBLIC_IP: ${PUBLIC_IP:-}
+      FIBER_NODE_NAME: ${FAUCET_NODE_NAME:-fibernuts-faucet}
+      FIBER_ANNOUNCED_P2P_PORT: "8238"
+      RUST_LOG: info
+    volumes:
+      - faucet-fnn-data:/fiber
+      - ./fnn-entrypoint.sh:/fnn-entrypoint.sh:ro
+    ports:
+      - "8238:8228"       # separate public P2P port; RPC remains private
     networks: [mintnet]
     depends_on:
       ipinit:
@@ -114,12 +145,45 @@ services:
     networks: [mintnet]
     restart: unless-stopped
 
+  # ── fixed-amount quote payer; never exposes the payer node's RPC ────────────
+  faucet:
+    build:
+      context: ../faucet
+      dockerfile: Dockerfile
+    environment:
+      FIBERNUTS_FAUCET_HOST: 0.0.0.0
+      FIBERNUTS_FAUCET_PORT: "8091"
+      FIBERNUTS_FAUCET_DATABASE: /app/data/faucet.sqlite3
+      FIBERNUTS_FAUCET_PUBLIC_ORIGIN: https://${FAUCET_DOMAIN}
+      FIBERNUTS_FAUCET_ALLOWED_ORIGINS: ${MARKET_ALLOWED_ORIGINS}
+      FIBERNUTS_FAUCET_MINT_URL: https://${MINT_DOMAIN}
+      FIBERNUTS_FAUCET_MINT_API_URL: http://fnn:8085
+      FIBERNUTS_FAUCET_FIBER_RPC: http://127.0.0.1:8227
+      FIBERNUTS_FAUCET_IDENTIFIER_SECRET: ${FAUCET_IDENTIFIER_SECRET}
+      FIBERNUTS_FAUCET_TRUST_PROXY: "true"
+      FIBERNUTS_FAUCET_ENABLED: ${FAUCET_ENABLED:-false}
+      FIBERNUTS_FAUCET_AMOUNT: ${FAUCET_AMOUNT:-1000}
+      FIBERNUTS_FAUCET_CLIENT_COOLDOWN_SECONDS: ${FAUCET_CLIENT_COOLDOWN_SECONDS:-86400}
+      FIBERNUTS_FAUCET_NETWORK_DAILY_CLAIM_LIMIT: ${FAUCET_NETWORK_DAILY_CLAIM_LIMIT:-3}
+      FIBERNUTS_FAUCET_DAILY_CLAIM_LIMIT: ${FAUCET_DAILY_CLAIM_LIMIT:-25}
+      FIBERNUTS_FAUCET_MAX_REQUESTS_PER_MINUTE: ${FAUCET_MAX_REQUESTS_PER_MINUTE:-120}
+    volumes:
+      - faucet-data:/app/data
+    network_mode: "service:faucet-fnn"
+    depends_on:
+      faucet-fnn:
+        condition: service_healthy
+      mintd:
+        condition: service_started
+    restart: unless-stopped
+
   # ── TLS reverse proxy for the mint API ──────────────────────────────────────
   caddy:
     image: caddy:2
     environment:
       MINT_DOMAIN: ${MINT_DOMAIN}
       RELAY_DOMAIN: ${RELAY_DOMAIN}
+      FAUCET_DOMAIN: ${FAUCET_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -132,6 +196,7 @@ services:
     depends_on:
       - fnn                # mintd shares fnn's namespace, so Caddy proxies to fnn:8085
       - relay
+      - faucet
     restart: unless-stopped
 
 networks:
@@ -140,7 +205,9 @@ networks:
 
 volumes:
   fnn-data:      # config.yml, the encrypted CKB key, channel + graph store — BACK THIS UP
+  faucet-fnn-data: # separate funded payer key, channel, and graph store — BACK THIS UP
   mintd-data:    # SQLite: which quotes are paid, which proofs are spent
   caddy-data:    # Let's Encrypt certificates
   caddy-config:
   relay-data:    # short-lived payment payloads and order capabilities
+  faucet-data:   # claim idempotency and aggregate demand counters

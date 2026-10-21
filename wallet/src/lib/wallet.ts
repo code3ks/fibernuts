@@ -1,5 +1,6 @@
 import {
   CheckStateEnum,
+  getPubKeyFromPrivKey,
   hasValidDleq,
   parseP2PKSecret,
   Mint,
@@ -88,6 +89,12 @@ export interface PreparedMint {
   keysetId: string;
   legacySignature?: string;
   payloadSignature?: string;
+}
+
+export interface LockedMintQuote {
+  quote: MintQuote;
+  privateKey: string;
+  publicKey: string;
 }
 
 export interface MeltExecution {
@@ -254,8 +261,26 @@ export class FibernutsWallet {
 
   /** Ask the mint for a Fiber invoice to pay. */
   async requestMint(amount: number): Promise<MintQuote> {
+    return this.createMintQuote(amount);
+  }
+
+  /** Ask for a quote that only this browser can redeem after an external payer funds it. */
+  async requestLockedMint(amount: number): Promise<LockedMintQuote> {
+    const { privateKey, publicKey } = createQuoteKeyPair();
+    const quote = await this.createMintQuote(amount, publicKey);
+    if (typeof quote.pubkey !== "string" || quote.pubkey.toLowerCase() !== publicKey) {
+      throw new Error("The mint did not lock the quote to this browser.");
+    }
+    return { quote, privateKey, publicKey };
+  }
+
+  private async createMintQuote(amount: number, pubkey?: string): Promise<MintQuote> {
     if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error("Add-cash amount must be a positive integer.");
-    const quote = await this.wallet.createMintQuote<MintQuote>(METHOD, { amount, unit: this.unit });
+    const quote = await this.wallet.createMintQuote<MintQuote>(METHOD, {
+      amount,
+      unit: this.unit,
+      ...(pubkey ? { pubkey } : {}),
+    });
     if (typeof quote.unit !== "string" || quote.unit.toLowerCase() !== this.unit || units(quote.amount) !== amount) {
       throw new Error("The mint returned a quote for a different amount or unit.");
     }
@@ -276,8 +301,14 @@ export class FibernutsWallet {
   }
 
   /** Prepare mint outputs so their secrets can be stored before issuance. */
-  async prepareMint(quote: MintQuote): Promise<PreparedMint> {
-    const preview = await this.wallet.prepareMint(METHOD, quote.amount, quote);
+  async prepareMint(quote: MintQuote, quotePrivateKey?: string): Promise<PreparedMint> {
+    if (quote.pubkey && !quotePrivateKey) throw new Error("The locked mint quote is missing its browser recovery key.");
+    const preview = await this.wallet.prepareMint(
+      METHOD,
+      quote.amount,
+      quote,
+      quotePrivateKey ? { privkey: quotePrivateKey } : undefined,
+    );
     return {
       outputData: preview.outputData.map(OutputData.serialize),
       keysetId: preview.keysetId,
@@ -552,6 +583,22 @@ export class FibernutsWallet {
     };
   }
 
+}
+
+function bytesToHex(value: Uint8Array): string {
+  return Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function createQuoteKeyPair(): { privateKey: string; publicKey: string } {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    try {
+      return { privateKey: bytesToHex(secret), publicKey: bytesToHex(getPubKeyFromPrivKey(secret)) };
+    } catch {
+      // Retry the negligible invalid-scalar case without exposing the candidate key.
+    }
+  }
+  throw new Error("A one-time quote key could not be generated.");
 }
 
 /** Match NUT-09's sparse, mint-ordered response back to the exact locally stored outputs. */

@@ -30,6 +30,9 @@ wallet ──HTTP──▶ cdk-mintd ──gRPC──▶ fibernuts-processor ─
 | `mint/cdk-fiber/` | the core protocol adapter: CDK's `MintPayment` over Fiber JSON-RPC |
 | `mint/processor/` | `fibernuts-processor`, serving the adapter over CDK's gRPC protocol |
 | `wallet/` | a reference wallet for minting, sending, receiving, and melting RUSD ecash |
+| `market/` | the Community Market reference application for attendee and vendor payments |
+| `relay/` | capability-scoped delivery for vendor-locked payment requests |
+| `faucet/` | a bounded testnet service that pays fixed, browser-locked mint quotes |
 | `deploy/` | operator deployment plus reproducible devnet and testnet integration environments |
 
 **Who runs this?** An operator self-hosts the mint (a Fiber node + `fibernuts-processor` + a stock
@@ -72,9 +75,10 @@ hard part, which is acquiring testnet RUSD.
 ## Try the live mint
 
 A reference mint is live on public testnet at **https://mint.fibernuts.xyz**, with the wallet at
-**https://fibernuts.xyz**. The wallet is already pointed at the reference mint. Holding, sending,
-and receiving ecash needs nothing but the wallet; minting and melting additionally require a
-routable RUSD channel.
+**https://fibernuts.xyz** and the Community Market at **https://market.fibernuts.xyz**. The wallet
+is already pointed at the reference mint. Holding, sending, and receiving ecash needs nothing but
+the wallet. The Market can offer one bounded testnet claim when the operator-funded quote payer is
+available; the normal mint and melt paths still require a routable RUSD channel.
 
 The reference mint's public coordinates are:
 
@@ -88,7 +92,7 @@ MINT_CKB_ADDRESS="ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqdy3e
 `MINT_CKB_ADDRESS` funds the mint operator's side of Fiber channel cells and fees. It is not a
 Cashu deposit address: sending CKB or RUSD to it does not issue ecash.
 
-To **mint** (deposit RUSD) you pay the mint's Fiber invoice from your own Fiber node, so first
+To **mint from the reference wallet** (deposit RUSD) you pay the mint's Fiber invoice from your own Fiber node, so first
 fund your node with testnet CKB and on-chain RUSD, then open a public RUSD channel from that node
 into the mint. The mint auto-accepts RUSD channels ≥ 10 RUSD:
 

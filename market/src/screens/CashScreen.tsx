@@ -1,5 +1,5 @@
-import { ArrowRight, CheckCircle2, Landmark, Plus, RefreshCw, WalletCards } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { ArrowRight, CheckCircle2, Circle, HandCoins, Landmark, LoaderCircle, Plus, RefreshCw, WalletCards } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import type { CashOutOperation } from "@wallet-domain/operations";
 import { explainMeltError, fmt, parseAmount, units, type MeltQuote } from "@wallet-lib/wallet";
@@ -11,7 +11,7 @@ import type { CashOutReview } from "../domain/market-runtime";
 import { EVENT } from "../event/manifest";
 import type { MarketController } from "../hooks/useMarket";
 
-type CashMode = "overview" | "add" | "cashout";
+type CashMode = "overview" | "claim" | "add" | "cashout";
 
 function cashTone(operation: MarketController["snapshot"]["addCash"][number] | CashOutOperation) {
   if (operation.state === "settled" || operation.state === "paid") return "settled" as const;
@@ -36,13 +36,17 @@ function cashLabel(operation: MarketController["snapshot"]["addCash"][number] | 
 export function CashScreen({ market }: { market: MarketController }) {
   const [mode, setMode] = useState<CashMode>("overview");
   const [selectedOperationId, setSelectedOperationId] = useState<string | null>(null);
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }, [mode, selectedOperationId]);
   const mintName = market.profile?.name ?? new URL(EVENT.mintUrl).host;
   const closeOperation = () => { setSelectedOperationId(null); setMode("overview"); };
+  if (mode === "claim") return <ClaimTestCash market={market} mintName={mintName} initialOperationId={selectedOperationId} onBack={closeOperation} />;
   if (mode === "add") return <AddCash market={market} mintName={mintName} initialOperationId={selectedOperationId} onBack={closeOperation} />;
   if (mode === "cashout") return <CashOut market={market} mintName={mintName} initialOperationId={selectedOperationId} onBack={closeOperation} />;
   const available = market.status === "online" && !market.storageError && !market.preview;
   const activity = [
-    ...market.snapshot.addCash.map((operation) => ({ operation, mode: "add" as const })),
+    ...market.snapshot.addCash.map((operation) => ({ operation, mode: operation.fundingSource === "faucet" ? "claim" as const : "add" as const })),
     ...market.snapshot.cashOut.map((operation) => ({ operation, mode: "cashout" as const })),
   ].sort((left, right) => right.operation.createdAt - left.operation.createdAt);
   return (
@@ -56,9 +60,32 @@ export function CashScreen({ market }: { market: MarketController }) {
       </section>
       {!available ? <Notice tone="recoverable">{market.preview ? "Preview data cannot move value." : "The mint must be reachable before adding or cashing out ecash."}</Notice> : null}
       <div className="cash-actions">
+        {market.role === "attendee" ? (
+          <button
+            type="button"
+            disabled={!available || market.faucetStatus !== "available"}
+            onClick={() => { setSelectedOperationId(null); setMode("claim"); }}
+          >
+            <HandCoins size={22} aria-hidden="true" />
+            <span>
+              <strong>Claim test RUSD</strong>
+              <small>{market.faucetConfig ? `${fmt(market.faucetConfig.amount)} RUSD for the Community Market` : market.faucetStatus === "loading" ? "Checking community faucet" : "Community faucet unavailable"}</small>
+            </span>
+            <ArrowRight size={18} aria-hidden="true" />
+          </button>
+        ) : null}
         <button type="button" disabled={!available} onClick={() => { setSelectedOperationId(null); setMode("add"); }}><Plus size={22} aria-hidden="true" /><span><strong>Add cash</strong><small>Pay a Fiber invoice, then receive ecash</small></span><ArrowRight size={18} aria-hidden="true" /></button>
         <button type="button" disabled={!available || market.balance === 0} onClick={() => { setSelectedOperationId(null); setMode("cashout"); }}><Landmark size={22} aria-hidden="true" /><span><strong>Cash out</strong><small>Ask the mint to pay an external Fiber invoice</small></span><ArrowRight size={18} aria-hidden="true" /></button>
       </div>
+      {market.role === "attendee" && ["paused", "unavailable"].includes(market.faucetStatus) ? (
+        <Notice
+          tone="recoverable"
+          title="Community claims unavailable"
+          action={<Button variant="ghost" icon={RefreshCw} onClick={market.retryFaucet}>Check again</Button>}
+        >
+          {market.faucetError ?? "The normal Fiber add-cash path is still available."}
+        </Notice>
+      ) : null}
       <Notice tone="neutral" title="Bounded custodial trust">The mint claims custody of the backing RUSD and controls issuance and redemption. Reachability does not prove reserves or liquidity.</Notice>
       {activity.length > 0 ? (
         <section className="cash-history" aria-labelledby="cash-history-title">
@@ -71,13 +98,128 @@ export function CashScreen({ market }: { market: MarketController }) {
                 key={operation.id}
                 onClick={() => { setSelectedOperationId(operation.id); setMode(operationMode); }}
               >
-                <span><strong>{operation.kind === "add" ? "Add cash" : "Cash out"}</strong><small>{new Date(operation.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></span>
+                <span><strong>{operation.kind === "add" ? operation.fundingSource === "faucet" ? "Test RUSD claim" : "Add cash" : "Cash out"}</strong><small>{new Date(operation.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></span>
                 <span><strong className="mono">{operation.kind === "add" ? "+" : "−"}{fmt(operation.amount)} RUSD</strong><StatusBadge tone={cashTone(operation)}>{cashLabel(operation)}</StatusBadge></span>
               </button>
             ))}
           </div>
         </section>
       ) : null}
+    </div>
+  );
+}
+
+function ClaimProgress({ operation }: { operation: MarketController["snapshot"]["addCash"][number] }) {
+  const issuing = ["payment_observed", "issuing", "settled"].includes(operation.state) || Boolean(operation.outputData);
+  const settled = operation.state === "settled";
+  const stopped = operation.state === "expired" || operation.state === "failed";
+  const recoveringPayment = operation.state === "recoverable" && !issuing;
+  const recoveringIssuance = operation.state === "recoverable" && issuing;
+  const steps = [
+    { label: "Quote locked to this browser", complete: true, current: false, recoverable: false },
+    {
+      label: stopped ? "Fiber payment not completed" : recoveringPayment ? "Fiber payment needs attention" : "Faucet paying through Fiber",
+      complete: issuing,
+      current: !issuing && !stopped,
+      recoverable: recoveringPayment,
+    },
+    {
+      label: recoveringIssuance ? "Mint issuance needs attention" : "Mint issuing fresh ecash",
+      complete: settled,
+      current: issuing && !settled,
+      recoverable: recoveringIssuance,
+    },
+  ];
+  return (
+    <ol className="claim-progress" aria-label="Claim progress">
+      {steps.map((step) => (
+        <li key={step.label} className={step.complete ? "claim-progress__complete" : step.recoverable ? "claim-progress__recoverable" : step.current ? "claim-progress__current" : ""}>
+          {step.complete ? <CheckCircle2 size={18} aria-hidden="true" /> : step.recoverable ? <RefreshCw size={18} aria-hidden="true" /> : step.current ? <LoaderCircle className="spin" size={18} aria-hidden="true" /> : <Circle size={18} aria-hidden="true" />}
+          <span>{step.label}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function ClaimTestCash({ market, mintName, initialOperationId, onBack }: { market: MarketController; mintName: string; initialOperationId: string | null; onBack: () => void }) {
+  const [operationId, setOperationId] = useState<string | null>(initialOperationId);
+  const [error, setError] = useState<string | null>(null);
+  const [faucetMessage, setFaucetMessage] = useState<string | null>(null);
+  const operation = useMemo(() => market.snapshot.addCash.find((item) => item.id === operationId) ?? null, [market.snapshot.addCash, operationId]);
+  const claim = async (input: MarketController["snapshot"]["addCash"][number]) => {
+    const status = await market.fundTestCash(input);
+    if (status.status === "failed") {
+      setFaucetMessage(null);
+      await market.refreshAddCash(input);
+      return;
+    }
+    setFaucetMessage(status.message);
+    await market.refreshAddCash(input);
+  };
+  const begin = async () => {
+    setError(null);
+    setFaucetMessage(null);
+    try {
+      const created = await market.requestTestCash();
+      setOperationId(created.id);
+      await claim(created);
+    } catch (reason) {
+      setError(safeErrorMessage(reason, "The testnet claim could not be started."));
+    }
+  };
+  const resume = async () => {
+    if (!operation) return;
+    setError(null);
+    try { await claim(operation); }
+    catch (reason) { setError(safeErrorMessage(reason, "The claim result could not be checked.")); }
+  };
+
+  if (operation) {
+    const settled = operation.state === "settled";
+    const stopped = operation.state === "expired" || operation.state === "failed";
+    return (
+      <div className="flow-column flow-enter">
+        <ScreenHeading eyebrow="Community testnet claim" title={settled ? "Test RUSD ready" : "Funding your mint quote"}>The faucet pays through Fiber. Only {mintName} can issue the browser-locked ecash.</ScreenHeading>
+        <section className="claim-ticket" aria-label={`${fmt(operation.amount)} RUSD testnet claim`}>
+          <div><StatusBadge tone={settled ? "settled" : stopped ? "failed" : operation.state === "recoverable" ? "recoverable" : "pending"}>{settled ? "Issued" : stopped ? "Stopped" : operation.state === "recoverable" ? "Recovery required" : "In progress"}</StatusBadge><strong>{fmt(operation.amount)} <small>RUSD</small></strong></div>
+          <ClaimProgress operation={operation} />
+        </section>
+        {operation.error ? <Notice tone="recoverable">{operation.error}</Notice> : null}
+        {settled ? <Notice tone="settled">Fresh proofs were issued and persisted before the spendable balance changed.</Notice> : faucetMessage ? <Notice tone="pending">{faucetMessage}</Notice> : <Notice tone="pending">This quote is stored locally. It is safe to leave and resume the same claim.</Notice>}
+        {error ? <Notice tone="failed">{error}</Notice> : null}
+        {!settled && !stopped ? (
+          <details className="claim-fallback">
+            <summary>Use your own Fiber wallet instead</summary>
+            <p>The locked quote remains redeemable only by this browser after either payer settles it.</p>
+            <QrPanel value={operation.invoice} label="Fiber invoice" size={190} />
+          </details>
+        ) : null}
+        <div className="split-actions split-actions--claim">
+          <Button variant="secondary" onClick={onBack}>Back to cash</Button>
+          {settled || stopped ? <Button icon={CheckCircle2} onClick={onBack}>Done</Button> : <Button icon={RefreshCw} busy={market.busy} onClick={() => void resume()}>Check claim</Button>}
+        </div>
+      </div>
+    );
+  }
+
+  const configuredAmount = market.faucetConfig?.amount;
+  return (
+    <div className="flow-column flow-enter">
+      <ScreenHeading eyebrow="Community testnet claim" title={configuredAmount ? `Claim ${fmt(configuredAmount)} test RUSD` : "Claim test RUSD"}>Start with enough ecash to try the Community Market without operating a Fiber node.</ScreenHeading>
+      <section className="claim-offer">
+        <div><span>Amount</span><strong>{configuredAmount ? fmt(configuredAmount) : "--"} RUSD</strong></div>
+        <div><span>Network</span><strong>{EVENT.networkLabel}</strong></div>
+        <div><span>Issuer</span><strong>{mintName}</strong></div>
+        <div><span>Availability</span><strong>{market.faucetConfig?.remainingToday ?? "--"} claims left today</strong></div>
+      </section>
+      <Notice tone="neutral" title="Testnet value only">FiberNuts pays one mint invoice from a project-operated node. The mint remains custodial, and this RUSD has no monetary value.</Notice>
+      <p className="claim-privacy">Rate limited per browser and network address. Claim activity is counted in aggregate and is not linked to later Cashu spending.</p>
+      {error ? <Notice tone="failed">{error}</Notice> : null}
+      <div className="split-actions split-actions--claim">
+        <Button variant="secondary" onClick={onBack}>Cancel</Button>
+        <Button icon={HandCoins} busy={market.busy} disabled={market.faucetStatus !== "available"} onClick={() => void begin()}>{configuredAmount ? `Claim ${fmt(configuredAmount)} RUSD` : "Claim test RUSD"}</Button>
+      </div>
     </div>
   );
 }

@@ -22,6 +22,11 @@ wants to issue ecash backed by RUSD on Fiber. They run four things on a server:
 - **cdk-mintd**, the stock Cashu mint server, exposing an HTTP API at, say, `https://mint.acme.com`;
 - optionally the **wallet** as a static site, though users can bring their own.
 
+A public testnet trial may also run the optional `faucet/` service with a separate funded Fiber
+node. It pays a bounded number of fixed, browser-locked mint quotes so users can test an application
+before consumer LSP and wallet funding flows exist. It is reference infrastructure, not part of the
+mint trust model and not a general payment endpoint.
+
 **The users** run nothing. They point any Cashu wallet — the one in this repo, or any NUT-04/NUT-05
 wallet (Cashu.me, Nutstash, a mobile app, a CLI) — at the operator's mint URL. They:
 

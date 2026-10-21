@@ -38,6 +38,9 @@ export interface AddCashOperation extends BaseOperation {
   quoteId: string;
   invoice: string;
   expiry?: number;
+  fundingSource?: "faucet";
+  quotePubkey?: string;
+  quotePrivateKey?: string;
   outputData?: SerializedOutputData[];
   keysetId?: string;
   legacySignature?: string;

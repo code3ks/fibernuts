@@ -1,5 +1,12 @@
 import { expect, test, type BrowserContext, type Page, type Route } from "@playwright/test";
-import { createBlindSignature, deriveKeysetId, getPubKeyFromPrivKey, pointFromHex } from "@cashu/cashu-ts";
+import {
+  createBlindSignature,
+  deriveKeysetId,
+  getPubKeyFromPrivKey,
+  pointFromHex,
+  verifyMintQuoteSignature,
+  type SerializedBlindedMessage,
+} from "@cashu/cashu-ts";
 
 const viewports = [
   { name: "mobile", width: 375, height: 812 },
@@ -16,6 +23,10 @@ interface SharedServices {
   dropNextDeliveryResponse?: boolean;
   mintQuoteAmount?: number;
   mintQuotePaid?: boolean;
+  mintQuotePubkey?: string;
+  mintPayloadSignature?: string;
+  faucetQuoteIds?: string[];
+  faucetFailure?: boolean;
 }
 
 const uncaughtErrors = new WeakMap<Page, string[]>();
@@ -68,6 +79,45 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (url.port === "8091") {
+      if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors(route) });
+      if (path === "/v1/config" && request.method() === "GET") {
+        return route.fulfill({ headers: cors(route), json: {
+          enabled: true,
+          amount: 1000,
+          unit: "rusd",
+          network: "testnet",
+          mint: "http://127.0.0.1:5175",
+          cooldownSeconds: 86400,
+          remainingToday: 24,
+        } });
+      }
+      if (path === "/v1/claims" && request.method() === "POST") {
+        const body = request.postDataJSON() as { quote_id?: string; client_id?: string };
+        if (!body.quote_id || !body.client_id) return route.fulfill({ status: 400, headers: cors(route), json: { error: "invalid_request" } });
+        shared.faucetQuoteIds?.push(body.quote_id);
+        if (shared.faucetFailure) {
+          return route.fulfill({ status: 200, headers: cors(route), json: {
+            status: "failed",
+            amount: 1000,
+            unit: "rusd",
+            message: "The faucet payment did not settle. You can still pay the stored invoice from another Fiber wallet before it expires.",
+          } });
+        }
+        shared.mintQuotePaid = true;
+        const issued = (shared.faucetQuoteIds?.length ?? 0) > 1;
+        return route.fulfill({ status: 200, headers: cors(route), json: {
+          status: issued ? "issued" : "paid",
+          amount: 1000,
+          unit: "rusd",
+          message: issued
+            ? "The mint issued the test RUSD for this claim."
+            : "The Fiber payment settled. The mint is ready to issue ecash.",
+          retry_after_seconds: 2,
+        } });
+      }
+      return route.fulfill({ status: 404, headers: cors(route), json: { error: "synthetic_not_found" } });
+    }
     if (url.port === "8090") {
       if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors(route) });
       if (path === "/v1/orders" && request.method() === "POST") {
@@ -119,6 +169,7 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
           "10": { supported: true },
           "11": { supported: true },
           "19": { ttl: null, cached_endpoints: [{ method: "POST", path: "/v1/swap" }, { method: "POST", path: "/v1/mint/fiber" }] },
+          "20": { supported: true },
         },
       } });
     }
@@ -138,9 +189,10 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
       return route.fulfill({ json: { signatures: signOutputs(body.outputs) } });
     }
     if (path === "/v1/mint/quote/fiber" && request.method() === "POST") {
-      const body = request.postDataJSON() as { amount?: number | string };
+      const body = request.postDataJSON() as { amount?: number | string; pubkey?: string };
       shared.mintQuoteAmount = Number(body.amount);
       shared.mintQuotePaid = false;
+      shared.mintQuotePubkey = body.pubkey;
       return route.fulfill({ json: {
         quote: "market-mint-quote",
         request: "fibt1synthetic-market-mint-invoice",
@@ -148,6 +200,7 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
         expiry: Math.floor(Date.now() / 1000) + 3600,
         amount: shared.mintQuoteAmount,
         unit: "rusd",
+        ...(body.pubkey ? { pubkey: body.pubkey } : {}),
       } });
     }
     if (path === "/v1/mint/quote/fiber/market-mint-quote" && request.method() === "GET") {
@@ -159,11 +212,27 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
         expiry: Math.floor(Date.now() / 1000) + 3600,
         amount,
         amount_paid: shared.mintQuotePaid ? amount : 0,
+        amount_issued: 0,
         unit: "rusd",
+        ...(shared.mintQuotePubkey ? { pubkey: shared.mintQuotePubkey } : {}),
       } });
     }
     if (path === "/v1/mint/fiber" && request.method() === "POST") {
-      const body = request.postDataJSON() as { outputs?: Array<{ amount: number | string; B_: string; id: string }> };
+      const body = request.postDataJSON() as { signature?: string; outputs?: Array<{ amount: number | string; B_: string; id: string }> };
+      if (shared.mintQuotePubkey && (!body.signature || !body.outputs)) {
+        return route.fulfill({ status: 400, json: { code: 20008, detail: "Quote signature missing" } });
+      }
+      if (shared.mintQuotePubkey && !verifyMintQuoteSignature(
+        shared.mintQuotePubkey,
+        "market-mint-quote",
+        body.outputs as SerializedBlindedMessage[],
+        body.signature!,
+      )) {
+        // cdk 0.17.2 verifies the original NUT-20 message. cashu-ts first sends the amended
+        // signature and retries with this legacy signature when the mint returns code 20008.
+        return route.fulfill({ status: 400, json: { code: 20008, detail: "Quote signature invalid signature" } });
+      }
+      shared.mintPayloadSignature = body.signature;
       return route.fulfill({ json: { signatures: signOutputs(body.outputs) } });
     }
     if (path === "/v1/melt/quote/fiber" && request.method() === "POST") {
@@ -243,6 +312,107 @@ for (const viewport of viewports) {
     await page.screenshot({ path: testInfo.outputPath(`event-${viewport.name}.png`), fullPage: true, animations: "disabled" });
   });
 }
+
+for (const viewport of viewports) {
+  test(`test RUSD claim is stable at ${viewport.name} width`, async ({ page }, testInfo) => {
+    const shared: SharedServices = { payload: null, orderId: null, vendorSettled: false, acknowledged: false };
+    await mockServices(page.context(), shared);
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/");
+    const navigation = viewport.width >= 920 ? page.locator(".sidebar") : page.locator(".mobile-nav");
+    await navigation.getByRole("button", { name: "Cash" }).click();
+    const claimAction = page.getByRole("button", { name: /Claim test RUSD/ });
+    await expect(claimAction).toBeEnabled();
+    await claimAction.click();
+    const heading = page.getByRole("heading", { name: "Claim 10.00 test RUSD" });
+    await expect(heading).toBeVisible();
+    if (viewport.width < 920) {
+      const confirm = page.getByRole("button", { name: "Claim 10.00 RUSD" });
+      const [headingBox, headerBox, confirmBox, navigationBox] = await Promise.all([
+        heading.boundingBox(),
+        page.locator(".mobile-header").boundingBox(),
+        confirm.boundingBox(),
+        page.locator(".mobile-nav").boundingBox(),
+      ]);
+      expect(headingBox).not.toBeNull();
+      expect(headerBox).not.toBeNull();
+      expect(confirmBox).not.toBeNull();
+      expect(navigationBox).not.toBeNull();
+      expect(headingBox!.y).toBeGreaterThanOrEqual(headerBox!.y + headerBox!.height);
+      expect(confirmBox!.y + confirmBox!.height).toBeLessThanOrEqual(navigationBox!.y);
+    }
+    await expect(page.getByText("Testnet value only")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: testInfo.outputPath(`claim-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+  });
+}
+
+test("an attendee claims browser-locked test RUSD and recovers the settled activity after reload", async ({ page }) => {
+  const shared: SharedServices = {
+    payload: null,
+    orderId: null,
+    vendorSettled: false,
+    acknowledged: false,
+    faucetQuoteIds: [],
+  };
+  await mockServices(page.context(), shared);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await page.locator(".mobile-nav").getByRole("button", { name: "Cash" }).click();
+  await page.getByRole("button", { name: /Claim test RUSD/ }).click();
+  const confirm = page.getByRole("button", { name: "Claim 10.00 RUSD" });
+  await confirm.focus();
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("heading", { name: "Test RUSD ready" })).toBeVisible();
+  await expect.poll(() => shared.faucetQuoteIds?.length).toBe(2);
+  expect(shared.faucetQuoteIds).toEqual(["market-mint-quote", "market-mint-quote"]);
+  expect(shared.mintQuotePubkey).toMatch(/^(02|03)[a-f0-9]{64}$/);
+  expect(shared.mintPayloadSignature).toMatch(/^[a-f0-9]+$/i);
+  const stored = await page.evaluate(() => {
+    const key = Object.keys(localStorage).find((item) => item.includes(":attendee:"));
+    return key ? JSON.parse(localStorage.getItem(key) ?? "{}") : {};
+  }) as { addCash?: Array<{ fundingSource?: string; quotePrivateKey?: string; state?: string }> };
+  expect(stored.addCash?.[0]).toMatchObject({ fundingSource: "faucet", state: "settled" });
+  expect(stored.addCash?.[0].quotePrivateKey).toBeUndefined();
+
+  await page.reload();
+  await page.locator(".mobile-nav").getByRole("button", { name: "Cash" }).click();
+  await expect(page.locator(".screen-heading h1")).toHaveText("10.00 RUSD ecash");
+  await expect(page.locator(".cash-history").getByRole("button", { name: /Test RUSD claim/ })).toContainText("Added");
+  await expectNoHorizontalOverflow(page);
+});
+
+test("a payer failure preserves the locked invoice as a recoverable manual fallback", async ({ page }) => {
+  const shared: SharedServices = {
+    payload: null,
+    orderId: null,
+    vendorSettled: false,
+    acknowledged: false,
+    faucetQuoteIds: [],
+    faucetFailure: true,
+  };
+  await mockServices(page.context(), shared);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await page.locator(".mobile-nav").getByRole("button", { name: "Cash" }).click();
+  await page.getByRole("button", { name: /Claim test RUSD/ }).click();
+  await page.getByRole("button", { name: "Claim 10.00 RUSD" }).click();
+
+  await expect(page.getByText("Fiber payment needs attention")).toBeVisible();
+  await expect(page.getByText(/can still pay the stored invoice/i)).toBeVisible();
+  await expect(page.locator(".claim-progress .spin")).toHaveCount(0);
+  await page.getByText("Use your own Fiber wallet instead").click();
+  await expect(page.getByRole("button", { name: "Copy fiber invoice" })).toBeVisible();
+  await expect(page.locator(".screen-heading h1")).not.toContainText("10.00 RUSD ecash");
+  const storedState = await page.evaluate(() => {
+    const key = Object.keys(localStorage).find((item) => item.includes(":attendee:"));
+    const stored = key ? JSON.parse(localStorage.getItem(key) ?? "{}") : {};
+    return stored.addCash?.[0]?.state;
+  });
+  expect(storedState).toBe("recoverable");
+});
 
 test("vendor and attendee complete one locked POST payment in isolated browser contexts", async ({ browser }, testInfo) => {
   const shared: SharedServices = { payload: null, orderId: null, vendorSettled: false, acknowledged: false };

@@ -12,6 +12,7 @@ import {
   mintQuoteIsPaid,
   sumProofs,
   units,
+  type LockedMintQuote,
   type MeltQuote,
   type MintProfile,
   type MintQuote,
@@ -54,8 +55,9 @@ export interface MarketWallet {
   completePreparedReceive(swap: StoredSwapPreview): Promise<Proof[]>;
   checkTokenState(token: string): Promise<TokenSpendState>;
   requestMint(amount: number): Promise<MintQuote>;
+  requestLockedMint(amount: number): Promise<LockedMintQuote>;
   checkMintQuote(quote: string): Promise<MintQuote>;
-  prepareMint(quote: MintQuote): Promise<PreparedMint>;
+  prepareMint(quote: MintQuote, quotePrivateKey?: string): Promise<PreparedMint>;
   completeMint(quote: MintQuote, prepared: PreparedMint): Promise<Proof[]>;
   requestMelt(invoice: string): Promise<MeltQuote>;
   checkMeltQuote(quote: string): Promise<MeltQuote>;
@@ -164,6 +166,7 @@ function asMintQuote(operation: AddCashOperation, checked?: MintQuote): MintQuot
     request: operation.invoice,
     amount: operation.amount,
     unit: operation.unit,
+    ...(operation.quotePubkey ? { pubkey: operation.quotePubkey } : {}),
   } as unknown as MintQuote;
 }
 
@@ -716,10 +719,47 @@ export class MarketRuntime {
     });
   }
 
+  async requestTestCash(amount: number): Promise<AddCashOperation> {
+    const locked = await this.wallet.requestLockedMint(amount);
+    const timestamp = this.now();
+    return this.commitAdd({
+      id: createOperationId(),
+      kind: "add",
+      state: "awaiting_payment",
+      amount,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      mintUrl: this.manifest.mintUrl,
+      unit: "rusd",
+      quoteId: locked.quote.quote,
+      invoice: locked.quote.request,
+      expiry: locked.quote.expiry ?? undefined,
+      fundingSource: "faucet",
+      quotePubkey: locked.publicKey,
+      quotePrivateKey: locked.privateKey,
+    });
+  }
+
+  recordTestCashPayerFailure(input: AddCashOperation, message: string): AddCashOperation {
+    const operation = this.getSnapshot().addCash.find((item) => item.id === input.id) ?? input;
+    if (operation.fundingSource !== "faucet") throw new Error("This is not a community testnet claim.");
+    return this.commitAdd({
+      ...operation,
+      state: "recoverable",
+      updatedAt: this.now(),
+      error: message,
+    });
+  }
+
   async refreshAddCash(input: AddCashOperation): Promise<AddCashOperation> {
     let operation = this.getSnapshot().addCash.find((item) => item.id === input.id) ?? input;
     try {
       const checked = await this.wallet.checkMintQuote(operation.quoteId);
+      if (operation.quotePubkey) {
+        if (!checked.pubkey || checked.pubkey.toLowerCase() !== operation.quotePubkey.toLowerCase()) {
+          throw new Error("The mint did not return the expected browser lock for this quote.");
+        }
+      }
       if (!mintQuoteIsPaid(checked)) {
         if (operation.expiry && operation.expiry * 1000 <= this.now()) {
           return this.commitAdd({ ...operation, state: "expired", updatedAt: this.now(), error: "The Fiber invoice expired before payment was observed." });
@@ -728,7 +768,7 @@ export class MarketRuntime {
       }
       operation = this.commitAdd({ ...operation, state: "payment_observed", updatedAt: this.now(), error: undefined });
       if (!operation.outputData || !operation.keysetId) {
-        const prepared = await this.wallet.prepareMint(asMintQuote(operation, checked));
+        const prepared = await this.wallet.prepareMint(asMintQuote(operation, checked), operation.quotePrivateKey);
         operation = this.commitAdd({
           ...operation,
           state: "issuing",
@@ -736,6 +776,7 @@ export class MarketRuntime {
           keysetId: prepared.keysetId,
           legacySignature: prepared.legacySignature,
           payloadSignature: prepared.payloadSignature,
+          quotePrivateKey: undefined,
           updatedAt: this.now(),
         });
       }

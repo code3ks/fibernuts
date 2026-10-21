@@ -26,7 +26,10 @@ Three properties follow from the combination, and none of them hold for either s
 | `mint/cdk-fiber` | core library crate: `MintPayment` over Fiber JSON-RPC |
 | `mint/processor` | `fibernuts-processor` binary: serves `cdk-fiber` over cdk's gRPC payment-processor protocol |
 | `wallet/` | a reference wallet that mints, sends, receives and melts RUSD ecash |
-| `deploy/` | `cdk-mintd` config, plus `devnet.md`: the full cycle on a local Fiber devnet |
+| `market/` | a focused RUSD reference application for attendee and vendor payments |
+| `relay/` | capability-scoped delivery for vendor-locked NUT-18 payments |
+| `faucet/` | an optional, fixed-budget testnet quote payer for community trials |
+| `deploy/` | operator configuration plus reproducible devnet and testnet runbooks |
 
 ### Why an out-of-process processor
 
@@ -52,6 +55,26 @@ wallet ──HTTP──▶ cdk-mintd ──gRPC──▶ fibernuts-processor ─
 
 Only `Paid` credits. `Received` means a TLC arrived and has **not** settled; treating it as payment
 would mint ecash against money the mint does not hold.
+
+### Sponsored testnet mint (community trial)
+
+The optional faucet changes who pays the invoice, not how ecash is issued:
+
+1. The browser creates a fixed-amount `fiber` mint quote locked to a one-time public key and stores
+   the private key with the operation.
+2. The faucet accepts only the quote identifier. It fetches the quote from one configured mint,
+   verifies the exact RUSD amount, unit, expiry, testnet network, and packed RUSD UDT type script by
+   decoding the invoice with its own Fiber node.
+3. A separate, funded faucet node pays that exact invoice through a normal RUSD channel. The faucet
+   cannot choose blinded outputs or issue proofs.
+4. The browser observes the paid quote, signs the NUT-20 issuance request with its stored key,
+   persists the prepared outputs, and asks the mint for fresh proofs.
+
+The service never accepts arbitrary invoices. Quote and payment hashes are durable idempotency
+keys; an unknown response is reconciled with the payer node before any retry. Browser cooldown,
+per-network limits, and a global daily ceiling bound the operator's testnet liquidity. Identifiers
+are stored as keyed hashes and removed after retention. Aggregate claim counts measure trial use
+without linking a claim to later Cashu transfers.
 
 ### Melt (wallet spends ecash to a Fiber invoice)
 
@@ -131,8 +154,8 @@ for real, waits for the node to park the TLC in `Received`, and asserts nothing 
 
 ## 7. Scope
 
-**In scope.** Mint and melt of RUSD ecash over Fiber; a stock `cdk-mintd`; a reference wallet; a
-local devnet (`deploy/devnet.md`) and testnet.
+**In scope.** Mint and melt of RUSD ecash over Fiber; a stock `cdk-mintd`; a reference wallet and
+market; an optional bounded testnet quote payer; a local devnet (`deploy/devnet.md`) and testnet.
 
 **Out of scope.** Multi-unit mints (one unit per processor instance); Lightning interop via the
 cross-chain hub; onchain mint/melt; a `payment_proof` (the Fiber node exposes no preimage — see

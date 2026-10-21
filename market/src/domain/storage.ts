@@ -179,14 +179,21 @@ function assertBase(raw: StoredRecord, kind: string, manifest: EventManifest, la
 function normalizeAdd(value: unknown, manifest: EventManifest): AddCashOperation {
   const label = "add-cash operation";
   const raw = record(value, label);
-  exactKeys(raw, ["id", "kind", "state", "amount", "createdAt", "updatedAt", "mintUrl", "unit", "quoteId", "invoice"], ["note", "error", "expiry", "outputData", "keysetId", "legacySignature", "payloadSignature"], label);
+  exactKeys(raw, ["id", "kind", "state", "amount", "createdAt", "updatedAt", "mintUrl", "unit", "quoteId", "invoice"], ["note", "error", "expiry", "fundingSource", "quotePubkey", "quotePrivateKey", "outputData", "keysetId", "legacySignature", "payloadSignature"], label);
   assertBase(raw, "add", manifest, label);
   oneOf(raw.state, ADD_STATES, `${label} state`);
   text(raw.quoteId, `${label} quote`);
   text(raw.invoice, `${label} invoice`);
+  if (raw.fundingSource !== undefined && raw.fundingSource !== "faucet") throw malformed(`${label} funding source`);
+  const quotePubkey = optionalText(raw.quotePubkey, `${label} quote public key`, /^(02|03)[a-f0-9]{64}$/);
+  const quotePrivateKey = optionalText(raw.quotePrivateKey, `${label} quote private key`, /^[a-f0-9]{64}$/);
+  if (raw.fundingSource === "faucet" && !quotePubkey) throw malformed(`${label} quote public key`);
   return {
     ...(raw as unknown as AddCashOperation),
     expiry: optionalInteger(raw.expiry, `${label} expiry`, 1),
+    fundingSource: raw.fundingSource as "faucet" | undefined,
+    quotePubkey,
+    quotePrivateKey,
     outputData: optionalOutputData(raw.outputData, `${label} outputs`),
     keysetId: optionalText(raw.keysetId, `${label} keyset`),
     legacySignature: optionalText(raw.legacySignature, `${label} legacy signature`),

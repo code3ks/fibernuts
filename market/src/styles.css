@@ -358,6 +358,25 @@ svg { flex: 0 0 auto; }
 .invoice-ticket > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .invoice-ticket > div:first-child > strong { font-family: var(--font-display); font-size: 32px; font-weight: 400; }
 .invoice-ticket > div:first-child small { color: var(--ink-muted); font-family: var(--font-mono); font-size: 10px; }
+.claim-offer { border-top: 1px solid var(--border-strong); }
+.claim-offer > div { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.claim-offer span { color: var(--ink-muted); }
+.claim-offer strong { max-width: 68%; text-align: right; overflow-wrap: anywhere; }
+.claim-offer > div:first-child strong { color: var(--primary); font-family: var(--font-display); font-size: 25px; font-weight: 400; }
+.claim-ticket { border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.claim-ticket > div:first-child { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 16px; border-bottom: 1px dashed var(--border-strong); }
+.claim-ticket > div:first-child > strong { font-family: var(--font-display); font-size: 32px; font-weight: 400; }
+.claim-ticket > div:first-child small { color: var(--ink-muted); font-family: var(--font-mono); font-size: 10px; }
+.claim-progress { display: grid; margin: 0; padding: 8px 16px 13px; list-style: none; }
+.claim-progress li { min-height: 46px; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 10px; color: var(--ink-muted); border-bottom: 1px solid var(--border); font-size: 12px; }
+.claim-progress li:last-child { border-bottom: 0; }
+.claim-progress__complete { color: var(--settled) !important; }
+.claim-progress__current { color: var(--pending) !important; font-weight: 700; }
+.claim-progress__recoverable { color: var(--recoverable) !important; font-weight: 700; }
+.claim-fallback { border-top: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); padding: 0 4px 16px; }
+.claim-fallback summary { min-height: 48px; display: flex; align-items: center; color: var(--primary); cursor: pointer; font-size: 12px; font-weight: 700; }
+.claim-fallback p { margin-bottom: 14px; color: var(--ink-muted); font-size: 12px; line-height: 1.5; }
+.claim-privacy { color: var(--ink-muted); font-size: 11px; line-height: 1.5; text-align: center; }
 .toast { position: fixed; z-index: 80; right: 14px; bottom: calc(80px + env(safe-area-inset-bottom)); left: 14px; min-height: 46px; display: grid; place-items: center; border: 1px solid #adcfb3; border-radius: 6px; color: var(--settled); background: var(--settled-soft); padding: 10px 14px; box-shadow: var(--shadow-paper); font-size: 12px; font-weight: 700; text-align: center; }
 .fatal-error { width: min(100% - 32px, 620px); margin: 80px auto; }
 .fatal-error .button { margin-top: 10px; }
@@ -408,6 +427,7 @@ svg { flex: 0 0 auto; }
   .event-intro h1 { font-size: 40px; }
   .balance-receipt__amount strong { font-size: 49px; }
   .split-actions { grid-template-columns: 1fr; }
+  .split-actions--claim { grid-template-columns: .8fr 1.3fr; }
   .split-actions--confirm { grid-template-columns: .8fr 1.3fr; }
   .catalog-row--custom { align-items: start; }
   .catalog-row--custom label { min-width: 112px; }

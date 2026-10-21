@@ -1,5 +1,5 @@
-# Automatic HTTPS in front of the mint and relay APIs. Both hostnames need A records pointing at
-# this server before Caddy can obtain their certificates.
+# Automatic HTTPS in front of the mint, relay, and testnet claim APIs. All hostnames need A records
+# pointing at this server before Caddy can obtain their certificates.
 
 {$MINT_DOMAIN} {
 	# mintd listens on 0.0.0.0:8085 inside fnn's network namespace; the fnn container is
@@ -11,5 +11,11 @@
 {$RELAY_DOMAIN} {
 	# Access logging is intentionally disabled because delivery paths contain bearer capabilities.
 	reverse_proxy relay:8090
+	encode zstd gzip
+}
+
+{$FAUCET_DOMAIN} {
+	# Access logging stays disabled: claim requests contain mint quote identifiers.
+	reverse_proxy faucet-fnn:8091
 	encode zstd gzip
 }

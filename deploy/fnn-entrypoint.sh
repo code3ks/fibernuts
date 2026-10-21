@@ -1,5 +1,5 @@
 #!/bin/sh
-# Init wrapper for the mint's Fiber node.
+# Init wrapper for a FiberNuts Fiber node.
 #
 # The node must announce this server's PUBLIC IP so payments can route to it. You do NOT set that
 # by hand — a small init step writes the server's own public IP to /fiber/public_ip, and this reads
@@ -40,9 +40,11 @@ if [ ! -f "$CONFIG" ]; then
     echo "[fnn-init]          routable. Set PUBLIC_IP in .env if auto-detection is blocked." >&2
     IP=0.0.0.0
   fi
-  sed -i "s|^fiber:|fiber:\n  auto_announce_node: true\n  announce_private_addr: false\n  announced_node_name: \"${MINT_NODE_NAME:-fibernuts-mint}\"|" "$CONFIG"
-  sed -i "s|^\(  announced_addrs:\)|\1\n    - \"/ip4/${IP}/tcp/8228\"|" "$CONFIG"
-  echo "[fnn-init] announcing /ip4/${IP}/tcp/8228" >&2
+  ANNOUNCED_PORT="${FIBER_ANNOUNCED_P2P_PORT:-8228}"
+  NODE_NAME="${FIBER_NODE_NAME:-${MINT_NODE_NAME:-fibernuts-mint}}"
+  sed -i "s|^fiber:|fiber:\n  auto_announce_node: true\n  announce_private_addr: false\n  announced_node_name: \"${NODE_NAME}\"|" "$CONFIG"
+  sed -i "s|^\(  announced_addrs:\)|\1\n    - \"/ip4/${IP}/tcp/${ANNOUNCED_PORT}\"|" "$CONFIG"
+  echo "[fnn-init] announcing /ip4/${IP}/tcp/${ANNOUNCED_PORT}" >&2
 fi
 
 exec /usr/local/bin/docker-entrypoint.sh fnn

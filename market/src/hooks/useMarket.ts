@@ -18,9 +18,18 @@ import {
   saveMarketSnapshot,
 } from "../domain/storage";
 import { safeErrorMessage } from "../domain/errors";
+import {
+  FaucetClient,
+  faucetClientId,
+  type FaucetClaim,
+  type FaucetConfig,
+} from "../domain/faucet";
 import type { AttendeePayment, MarketRole, MarketSnapshot, OrderItem, VendorOrder } from "../domain/types";
 
 export type MarketConnectionStatus = "connecting" | "online" | "offline" | "incompatible" | "preview";
+export type FaucetConnectionStatus = "loading" | "available" | "paused" | "unavailable" | "preview";
+
+const faucetClient = new FaucetClient(EVENT.faucet.origin);
 
 interface InitialState {
   snapshot: MarketSnapshot;
@@ -54,7 +63,11 @@ export interface MarketController {
   busy: boolean;
   toast: string | null;
   preview: boolean;
+  faucetConfig: FaucetConfig | null;
+  faucetStatus: FaucetConnectionStatus;
+  faucetError: string | null;
   retryConnection: () => void;
+  retryFaucet: () => void;
   reviewPayment: (encoded: string) => Promise<PaymentReview>;
   confirmPayment: (review: PaymentReview) => Promise<AttendeePayment>;
   retryPaymentDelivery: (payment: AttendeePayment) => Promise<AttendeePayment>;
@@ -63,6 +76,8 @@ export interface MarketController {
   pollOrder: (order: VendorOrder) => Promise<VendorOrder>;
   cancelOrder: (order: VendorOrder) => Promise<VendorOrder>;
   requestAddCash: (amount: number) => Promise<AddCashOperation>;
+  requestTestCash: () => Promise<AddCashOperation>;
+  fundTestCash: (operation: AddCashOperation) => Promise<FaucetClaim>;
   refreshAddCash: (operation: AddCashOperation) => Promise<AddCashOperation>;
   quoteCashOut: (invoice: string) => Promise<MeltQuote>;
   reviewCashOut: (quote: MeltQuote) => Promise<CashOutReview>;
@@ -81,6 +96,10 @@ export function useMarket(role: MarketRole): MarketController {
   const [reloadKey, setReloadKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [faucetConfig, setFaucetConfig] = useState<FaucetConfig | null>(null);
+  const [faucetStatus, setFaucetStatus] = useState<FaucetConnectionStatus>(PREVIEW_MODE ? "preview" : "loading");
+  const [faucetError, setFaucetError] = useState<string | null>(null);
+  const [faucetReloadKey, setFaucetReloadKey] = useState(0);
   const snapshotRef = useRef(snapshot);
   const inFlightRef = useRef(false);
 
@@ -134,6 +153,28 @@ export function useMarket(role: MarketRole): MarketController {
     });
     return () => { cancelled = true; };
   }, [reloadKey]);
+
+  useEffect(() => {
+    if (PREVIEW_MODE) return;
+    let cancelled = false;
+    setFaucetConfig(null);
+    setFaucetStatus("loading");
+    setFaucetError(null);
+    void faucetClient.config().then((next) => {
+      if (cancelled) return;
+      if (next.mint !== EVENT.mintUrl || next.unit !== EVENT.unit || next.network !== EVENT.network) {
+        throw new Error("The community faucet is configured for a different mint, asset, or network.");
+      }
+      setFaucetConfig(next);
+      setFaucetStatus(next.enabled ? "available" : "paused");
+      if (!next.enabled) setFaucetError("Today's community claim budget is unavailable.");
+    }).catch((reason: unknown) => {
+      if (cancelled) return;
+      setFaucetStatus("unavailable");
+      setFaucetError(describe(reason));
+    });
+    return () => { cancelled = true; };
+  }, [faucetReloadKey]);
 
   useEffect(() => {
     if (PREVIEW_MODE) return;
@@ -208,7 +249,31 @@ export function useMarket(role: MarketRole): MarketController {
   }), [runLocked]);
   const cancelOrder = useCallback((order: VendorOrder) => runLocked((active) => active.cancelOrder(order)), [runLocked]);
   const requestAddCash = useCallback((amount: number) => runLocked((active) => active.requestAddCash(amount)), [runLocked]);
-  const refreshAddCash = useCallback((operation: AddCashOperation) => runLocked((active) => active.refreshAddCash(operation)), [runLocked]);
+  const requestTestCash = useCallback(() => {
+    if (!faucetConfig || faucetStatus !== "available") throw new Error(faucetError ?? "The community faucet is not available.");
+    return runLocked((active) => active.requestTestCash(faucetConfig.amount));
+  }, [faucetConfig, faucetError, faucetStatus, runLocked]);
+  const fundTestCash = useCallback((operation: AddCashOperation) => runLocked(async (active) => {
+    if (
+      operation.fundingSource !== "faucet" ||
+      operation.mintUrl !== EVENT.mintUrl || operation.unit !== EVENT.unit ||
+      (faucetConfig !== null && operation.amount !== faucetConfig.amount)
+    ) {
+      throw new Error("This stored mint quote does not match the community faucet.");
+    }
+    const current = snapshotRef.current.addCash.find((item) => item.id === operation.id);
+    if (!current || current.quoteId !== operation.quoteId) throw new Error("The stored claim could not be found.");
+    const claim = await faucetClient.claim(current.quoteId, faucetClientId(EVENT.faucet.origin));
+    if (claim.status === "failed") active.recordTestCashPayerFailure(current, claim.message);
+    return claim;
+  }), [faucetConfig, runLocked]);
+  const refreshAddCash = useCallback(async (operation: AddCashOperation) => {
+    const refreshed = await runLocked((active) => active.refreshAddCash(operation));
+    if (refreshed.fundingSource === "faucet" && refreshed.state === "settled") {
+      void faucetClient.claim(refreshed.quoteId, faucetClientId(EVENT.faucet.origin)).catch(() => undefined);
+    }
+    return refreshed;
+  }, [runLocked]);
   const quoteCashOut = useCallback((invoice: string) => requireRuntime().quoteCashOut(invoice), [requireRuntime]);
   const reviewCashOut = useCallback((quote: MeltQuote) => {
     reloadStoredSnapshot();
@@ -264,7 +329,11 @@ export function useMarket(role: MarketRole): MarketController {
     busy,
     toast,
     preview: PREVIEW_MODE,
+    faucetConfig,
+    faucetStatus,
+    faucetError,
     retryConnection: () => setReloadKey((value) => value + 1),
+    retryFaucet: () => setFaucetReloadKey((value) => value + 1),
     reviewPayment,
     confirmPayment,
     retryPaymentDelivery,
@@ -273,6 +342,8 @@ export function useMarket(role: MarketRole): MarketController {
     pollOrder,
     cancelOrder,
     requestAddCash,
+    requestTestCash,
+    fundTestCash,
     refreshAddCash,
     quoteCashOut,
     reviewCashOut,

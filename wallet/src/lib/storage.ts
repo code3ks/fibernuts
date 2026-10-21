@@ -57,7 +57,15 @@ function normalizeOperations(value: unknown): WalletOperation[] {
         typeof operation.quoteId !== "string" ||
         typeof operation.invoice !== "string"
       ) return [];
-      return [operation];
+      const fundingSource = operation.fundingSource === "faucet" ? "faucet" : undefined;
+      const quotePubkey = typeof operation.quotePubkey === "string" && /^(02|03)[a-f0-9]{64}$/.test(operation.quotePubkey)
+        ? operation.quotePubkey
+        : undefined;
+      const quotePrivateKey = typeof operation.quotePrivateKey === "string" && /^[a-f0-9]{64}$/.test(operation.quotePrivateKey)
+        ? operation.quotePrivateKey
+        : undefined;
+      if (fundingSource && !quotePubkey) return [];
+      return [{ ...operation, fundingSource, quotePubkey, quotePrivateKey }];
     }
 
     if (operation.kind === "send") {
