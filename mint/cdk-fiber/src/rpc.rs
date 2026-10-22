@@ -16,6 +16,7 @@ use crate::wire::{
 };
 
 /// The subset of FNN's JSON-RPC surface a Cashu mint needs.
+#[allow(clippy::double_must_use)] // async-trait generates must-use futures on newer compilers.
 #[async_trait]
 pub trait FiberRpc: std::fmt::Debug + Send + Sync {
     /// Create an invoice payable to this node.
