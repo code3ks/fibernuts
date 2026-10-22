@@ -7,6 +7,7 @@ import {
   ScanLine,
   ShoppingBasket,
   Store,
+  UserRound,
   WalletCards,
   type LucideIcon,
 } from "lucide-react";
@@ -90,6 +91,8 @@ export function Shell({
 }) {
   const nav = role === "attendee" ? ATTENDEE_NAV : VENDOR_NAV;
   const switchHref = role === "attendee" ? "/vendor" : "/";
+  const switchLabel = role === "attendee" ? "Vendor" : "Attendee";
+  const SwitchIcon = role === "attendee" ? Store : UserRound;
   return (
     <div className="app-canvas">
       <div className="network-tape">
@@ -123,8 +126,14 @@ export function Shell({
         <div className="app-surface">
           <header className="mobile-header">
             <div className="brand-block brand-block--compact"><span className="brand-mark" aria-hidden="true" /><strong>FiberNuts</strong></div>
-            <div className="mobile-header__title"><strong>{TITLE[screen]}</strong><small>{balance} RUSD ecash</small></div>
-            <span className={`connection-dot connection-dot--${status}`} title={statusLabel(status)} aria-label={statusLabel(status)} />
+            <div className="mobile-header__title">
+              <strong>{TITLE[screen]}</strong>
+              <small><span className={`connection-dot connection-dot--${status}`} title={statusLabel(status)} aria-label={statusLabel(status)} />{balance} RUSD ecash</small>
+            </div>
+            <a href={switchHref} className="mobile-role-switch" aria-label={`Switch to ${switchLabel.toLowerCase()}`}>
+              <SwitchIcon size={15} aria-hidden="true" />
+              <span>{switchLabel}</span>
+            </a>
           </header>
           <header className="desktop-header">
             <div><span className="eyebrow">{role === "attendee" ? "Attendee" : "Vendor"}</span><h2>{TITLE[screen]}</h2></div>

@@ -88,7 +88,7 @@ svg { flex: 0 0 auto; }
   top: 28px;
   min-height: 68px;
   display: grid;
-  grid-template-columns: minmax(94px, auto) 1fr 18px;
+  grid-template-columns: minmax(94px, auto) minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
@@ -115,7 +115,26 @@ svg { flex: 0 0 auto; }
 .brand-mark::after { content: ""; width: 6px; height: 17px; display: block; margin: 3px 0 0 8px; border-left: 1.5px solid var(--primary); border-radius: 50%; }
 .mobile-header__title { min-width: 0; display: grid; text-align: center; }
 .mobile-header__title strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.mobile-header__title small { color: var(--ink-muted); font-family: var(--font-mono); font-size: 9px; }
+.mobile-header__title small { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; color: var(--ink-muted); font-family: var(--font-mono); font-size: 9px; white-space: nowrap; }
+.mobile-header__title .connection-dot { width: 8px; height: 8px; }
+.mobile-role-switch {
+  min-width: 70px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 7px 8px;
+  color: var(--primary);
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.mobile-role-switch:hover { background: var(--primary-soft); }
 .connection-dot { width: 10px; height: 10px; display: inline-block; border: 1px solid rgb(24 32 28 / 18%); border-radius: 50%; background: var(--ink-muted); }
 .connection-dot--online { background: #48a66b; }
 .connection-dot--connecting { background: #d58c2b; }

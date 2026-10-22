@@ -314,6 +314,31 @@ for (const viewport of viewports) {
   });
 }
 
+test("the mobile role switch moves between isolated attendee and vendor apps", async ({ page }, testInfo) => {
+  const shared: SharedServices = { payload: null, orderId: null, vendorSettled: false, acknowledged: false };
+  const keysetId = await mockServices(page.context(), shared);
+  await seedAttendee(page, keysetId);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto("/");
+
+  const switchToVendor = page.locator(".mobile-header").getByRole("link", { name: "Switch to vendor" });
+  await expect(switchToVendor).toBeVisible();
+  await switchToVendor.focus();
+  await expect(switchToVendor).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  await expect(page).toHaveURL(/\/vendor$/);
+  await expect(page.locator(".mobile-header").getByRole("link", { name: "Switch to attendee" })).toBeVisible();
+  await expect(page.locator(".mobile-header__title small")).toContainText("0.00 RUSD ecash");
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath("vendor-role-mobile.png"), fullPage: true, animations: "disabled" });
+
+  await page.locator(".mobile-header").getByRole("link", { name: "Switch to attendee" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator(".mobile-header__title small")).toContainText("10.24 RUSD ecash");
+  await expectNoHorizontalOverflow(page);
+});
+
 for (const viewport of viewports) {
   test(`test RUSD claim is stable at ${viewport.name} width`, async ({ page }, testInfo) => {
     const shared: SharedServices = { payload: null, orderId: null, vendorSettled: false, acknowledged: false };
