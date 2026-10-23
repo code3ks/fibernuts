@@ -169,6 +169,106 @@ pub struct NewInvoiceParams {
 pub struct InvoiceData {
     /// `0x`-prefixed payment hash.
     pub payment_hash: String,
+    /// Invoice attributes. FNN represents each enum variant as a one-key JSON object.
+    #[serde(default)]
+    pub attrs: Vec<serde_json::Value>,
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Result<usize, Error> {
+    let value = bytes
+        .get(offset..offset + 4)
+        .ok_or(Error::InvalidInvoiceAsset)?;
+    Ok(u32::from_le_bytes(value.try_into().map_err(|_| Error::InvalidInvoiceAsset)?) as usize)
+}
+
+fn decode_hex_bytes(raw: &str) -> Result<Vec<u8>, Error> {
+    let body = raw.strip_prefix("0x").ok_or(Error::InvalidInvoiceAsset)?;
+    if body.is_empty() || body.len() % 2 != 0 || !body.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(Error::InvalidInvoiceAsset);
+    }
+    (0..body.len())
+        .step_by(2)
+        .map(|offset| {
+            u8::from_str_radix(&body[offset..offset + 2], 16)
+                .map_err(|_| Error::InvalidInvoiceAsset)
+        })
+        .collect()
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(2 + bytes.len() * 2);
+    encoded.push_str("0x");
+    for byte in bytes {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn decode_packed_script(raw: &str) -> Result<Script, Error> {
+    let bytes = decode_hex_bytes(raw)?;
+    let total = read_u32_le(&bytes, 0)?;
+    let code_hash_offset = read_u32_le(&bytes, 4)?;
+    let hash_type_offset = read_u32_le(&bytes, 8)?;
+    let args_offset = read_u32_le(&bytes, 12)?;
+    if total != bytes.len()
+        || code_hash_offset != 16
+        || hash_type_offset.checked_sub(code_hash_offset) != Some(32)
+        || args_offset.checked_sub(hash_type_offset) != Some(1)
+    {
+        return Err(Error::InvalidInvoiceAsset);
+    }
+
+    let hash_type = match bytes.get(hash_type_offset) {
+        Some(0) => "data",
+        Some(1) => "type",
+        Some(2) => "data1",
+        Some(4) => "data2",
+        _ => return Err(Error::InvalidInvoiceAsset),
+    };
+    let args_len = read_u32_le(&bytes, args_offset)?;
+    let args_start = args_offset
+        .checked_add(4)
+        .ok_or(Error::InvalidInvoiceAsset)?;
+    let args_end = args_start
+        .checked_add(args_len)
+        .ok_or(Error::InvalidInvoiceAsset)?;
+    if args_end != bytes.len() {
+        return Err(Error::InvalidInvoiceAsset);
+    }
+
+    Ok(Script {
+        code_hash: hex_bytes(
+            bytes
+                .get(code_hash_offset..hash_type_offset)
+                .ok_or(Error::InvalidInvoiceAsset)?,
+        ),
+        hash_type: hash_type.to_string(),
+        args: hex_bytes(
+            bytes
+                .get(args_start..args_end)
+                .ok_or(Error::InvalidInvoiceAsset)?,
+        ),
+    })
+}
+
+impl InvoiceData {
+    pub(crate) fn udt_type_script(&self) -> Result<Option<Script>, Error> {
+        let mut encoded: Option<&str> = None;
+        for attribute in &self.attrs {
+            let Some(value) = attribute
+                .as_object()
+                .and_then(|object| object.get("udt_script"))
+            else {
+                continue;
+            };
+            let script = value.as_str().ok_or(Error::InvalidInvoiceAsset)?;
+            if encoded.replace(script).is_some() {
+                return Err(Error::InvalidInvoiceAsset);
+            }
+        }
+        encoded.map(decode_packed_script).transpose()
+    }
 }
 
 /// A decoded Fiber invoice.
@@ -269,6 +369,15 @@ pub struct PaymentResult {
 mod tests {
     use super::*;
 
+    const RUSD_CODE_HASH: &str = "1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a";
+    const RUSD_ARGS: &str = "878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b";
+    const PACKED_RUSD_SCRIPT: &str = concat!(
+        "0x55000000100000003000000031000000",
+        "1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a",
+        "0120000000",
+        "878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"
+    );
+
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Req {
         #[serde(with = "hex_u128")]
@@ -335,6 +444,55 @@ mod tests {
     fn wrong_length_hashes_are_rejected() {
         assert!(hash_from_hex("0xdead").is_err());
         assert!(hash_from_hex("0xzz").is_err());
+    }
+
+    #[test]
+    fn packed_invoice_udt_script_decodes_to_the_exact_ckb_script() {
+        let data = InvoiceData {
+            payment_hash: "unused".to_string(),
+            attrs: vec![serde_json::json!({ "udt_script": PACKED_RUSD_SCRIPT })],
+        };
+        assert_eq!(
+            data.udt_type_script().unwrap(),
+            Some(Script {
+                code_hash: format!("0x{RUSD_CODE_HASH}"),
+                hash_type: "type".to_string(),
+                args: format!("0x{RUSD_ARGS}"),
+            })
+        );
+    }
+
+    #[test]
+    fn invoice_asset_script_must_be_unique_and_well_formed() {
+        let duplicate = InvoiceData {
+            payment_hash: "unused".to_string(),
+            attrs: vec![
+                serde_json::json!({ "udt_script": PACKED_RUSD_SCRIPT }),
+                serde_json::json!({ "udt_script": PACKED_RUSD_SCRIPT }),
+            ],
+        };
+        assert!(matches!(
+            duplicate.udt_type_script(),
+            Err(Error::InvalidInvoiceAsset)
+        ));
+
+        let malformed = InvoiceData {
+            payment_hash: "unused".to_string(),
+            attrs: vec![serde_json::json!({ "udt_script": "0xdeadbeef" })],
+        };
+        assert!(matches!(
+            malformed.udt_type_script(),
+            Err(Error::InvalidInvoiceAsset)
+        ));
+
+        let non_ascii = InvoiceData {
+            payment_hash: "unused".to_string(),
+            attrs: vec![serde_json::json!({ "udt_script": "0xeeee\u{e9}" })],
+        };
+        assert!(matches!(
+            non_ascii.udt_type_script(),
+            Err(Error::InvalidInvoiceAsset)
+        ));
     }
 
     #[test]

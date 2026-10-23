@@ -27,17 +27,36 @@ use cdk_fiber::{FiberBackend, FiberConfig};
 const HASH_HEX: &str = "0x5e51a85b7382b235440249867bc49e43fb30afb21bcf4663cb2ebf4f97c60078";
 const INVOICE: &str = "fibt1001pqn7qyqsm6uqzg7dwfhdvmratf9umr7lfhtc";
 const SCALE: u64 = 1_000_000;
+const PACKED_RUSD_SCRIPT: &str = concat!(
+    "0x55000000100000003000000031000000",
+    "1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a",
+    "0120000000",
+    "878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"
+);
 
 /// The invoice amount used throughout: 100 ecash units == 1.00 RUSD.
 const AMOUNT_ECASH: u64 = 100;
 const AMOUNT_BASE: u128 = AMOUNT_ECASH as u128 * SCALE as u128;
 
 fn invoice(amount: Option<u128>) -> CkbInvoice {
+    invoice_with(
+        cdk_fiber::wire::Currency::Fibt,
+        amount,
+        vec![serde_json::json!({ "udt_script": PACKED_RUSD_SCRIPT })],
+    )
+}
+
+fn invoice_with(
+    currency: cdk_fiber::wire::Currency,
+    amount: Option<u128>,
+    attrs: Vec<serde_json::Value>,
+) -> CkbInvoice {
     CkbInvoice {
-        currency: cdk_fiber::wire::Currency::Fibt,
+        currency,
         amount,
         data: InvoiceData {
             payment_hash: HASH_HEX.to_string(),
+            attrs,
         },
     }
 }
@@ -54,6 +73,7 @@ fn payment(status: PaymentStatus, fee: u128) -> PaymentResult {
 #[derive(Default)]
 struct Script {
     invoice_status: Option<CkbInvoiceStatus>,
+    parsed_invoice: Option<CkbInvoice>,
     /// Popped per call; the last entry repeats once exhausted.
     get_payment: VecDeque<Option<PaymentResult>>,
     send_payment: Option<PaymentResult>,
@@ -110,9 +130,14 @@ impl FiberRpc for MockNode {
     }
 
     async fn parse_invoice(&self, _invoice: &str) -> Result<ParseInvoiceResult, Error> {
-        Ok(ParseInvoiceResult {
-            invoice: invoice(Some(AMOUNT_BASE)),
-        })
+        let invoice = self
+            .script
+            .lock()
+            .await
+            .parsed_invoice
+            .clone()
+            .unwrap_or_else(|| invoice(Some(AMOUNT_BASE)));
+        Ok(ParseInvoiceResult { invoice })
     }
 
     async fn send_payment(&self, params: SendPaymentParams) -> Result<PaymentResult, Error> {
@@ -322,6 +347,88 @@ async fn a_melt_quote_prices_from_the_nodes_dry_run_fee() {
     let recorded = node.recorded.lock().await;
     assert_eq!(recorded.sends.len(), 1);
     assert_eq!(recorded.sends[0].dry_run, Some(true));
+}
+
+#[tokio::test]
+async fn a_wrong_network_melt_invoice_is_rejected_before_route_probe() {
+    let (backend, node) = backend(Script {
+        parsed_invoice: Some(invoice_with(
+            cdk_fiber::wire::Currency::Fibb,
+            Some(AMOUNT_BASE),
+            vec![serde_json::json!({ "udt_script": PACKED_RUSD_SCRIPT })],
+        )),
+        ..Script::default()
+    });
+
+    assert!(backend
+        .get_payment_quote(&rusd(), outgoing(None))
+        .await
+        .is_err());
+    assert!(node.recorded.lock().await.sends.is_empty());
+}
+
+#[tokio::test]
+async fn a_native_ckb_melt_invoice_is_rejected_by_a_rusd_backend() {
+    let (backend, node) = backend(Script {
+        parsed_invoice: Some(invoice_with(
+            cdk_fiber::wire::Currency::Fibt,
+            Some(AMOUNT_BASE),
+            vec![],
+        )),
+        ..Script::default()
+    });
+
+    assert!(backend
+        .get_payment_quote(&rusd(), outgoing(None))
+        .await
+        .is_err());
+    assert!(node.recorded.lock().await.sends.is_empty());
+}
+
+#[tokio::test]
+async fn a_different_udt_melt_invoice_is_rejected_before_route_probe() {
+    let mut packed_other_asset = PACKED_RUSD_SCRIPT.to_string();
+    packed_other_asset.replace_range(packed_other_asset.len() - 2.., "00");
+    let (backend, node) = backend(Script {
+        parsed_invoice: Some(invoice_with(
+            cdk_fiber::wire::Currency::Fibt,
+            Some(AMOUNT_BASE),
+            vec![serde_json::json!({ "udt_script": packed_other_asset })],
+        )),
+        ..Script::default()
+    });
+
+    assert!(backend
+        .get_payment_quote(&rusd(), outgoing(None))
+        .await
+        .is_err());
+    assert!(node.recorded.lock().await.sends.is_empty());
+}
+
+#[tokio::test]
+async fn malformed_or_duplicate_melt_asset_attributes_are_rejected() {
+    for attrs in [
+        vec![serde_json::json!({ "udt_script": "0xdeadbeef" })],
+        vec![
+            serde_json::json!({ "udt_script": PACKED_RUSD_SCRIPT }),
+            serde_json::json!({ "udt_script": PACKED_RUSD_SCRIPT }),
+        ],
+    ] {
+        let (backend, node) = backend(Script {
+            parsed_invoice: Some(invoice_with(
+                cdk_fiber::wire::Currency::Fibt,
+                Some(AMOUNT_BASE),
+                attrs,
+            )),
+            ..Script::default()
+        });
+
+        assert!(backend
+            .get_payment_quote(&rusd(), outgoing(None))
+            .await
+            .is_err());
+        assert!(node.recorded.lock().await.sends.is_empty());
+    }
 }
 
 #[tokio::test]

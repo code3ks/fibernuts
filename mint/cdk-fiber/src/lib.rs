@@ -153,6 +153,30 @@ impl FiberBackend {
     /// Resolve the invoice a melt refers to into its payment hash and amount.
     async fn resolve_invoice(&self, invoice: &str) -> Result<([u8; 32], String, u128), Error> {
         let parsed = self.inner.rpc.parse_invoice(invoice).await?;
+        let config = &self.inner.config;
+        if parsed.invoice.currency != config.currency {
+            return Err(Error::InvoiceNetworkMismatch {
+                configured: format!("{:?}", config.currency),
+                invoice: format!("{:?}", parsed.invoice.currency),
+            });
+        }
+        let invoice_asset = parsed.invoice.data.udt_type_script()?;
+        let asset_matches = match (&invoice_asset, &config.udt_type_script) {
+            (None, None) => true,
+            (Some(invoice), Some(configured)) => {
+                invoice
+                    .code_hash
+                    .eq_ignore_ascii_case(&configured.code_hash)
+                    && invoice
+                        .hash_type
+                        .eq_ignore_ascii_case(&configured.hash_type)
+                    && invoice.args.eq_ignore_ascii_case(&configured.args)
+            }
+            _ => false,
+        };
+        if !asset_matches {
+            return Err(Error::InvoiceAssetMismatch);
+        }
         let hash_hex = parsed.invoice.data.payment_hash.clone();
         let hash = wire::hash_from_hex(&hash_hex)?;
         let amount = parsed.invoice.amount.ok_or(Error::AmountlessInvoice)?;

@@ -6,6 +6,16 @@ import { Button, Notice, StatusBadge } from "../components/Primitives";
 import { EVENT } from "../event/manifest";
 import type { MarketController } from "../hooks/useMarket";
 
+function balanceStatusLabel(status: MarketController["status"]): string {
+  switch (status) {
+    case "online": return "Ready";
+    case "connecting": return "Checking";
+    case "preview": return "Preview";
+    case "incompatible": return "Unsupported";
+    case "offline": return "Unavailable";
+  }
+}
+
 export function AttendeeEvent({ market, onPay, onCash, onClaim }: {
   market: MarketController;
   onPay: () => void;
@@ -42,7 +52,7 @@ export function AttendeeEvent({ market, onPay, onCash, onClaim }: {
       {market.status === "incompatible" ? <Notice tone="failed" title="This browser or mint is not compatible">{market.connectionError}</Notice> : null}
 
       <section className="balance-receipt" aria-label={`${fmt(market.balance)} RUSD ecash balance`}>
-        <div className="balance-receipt__top"><span>RUSD ecash</span><StatusBadge tone={market.status === "online" ? "settled" : market.status === "connecting" ? "pending" : "recoverable"}>{market.status === "online" ? "Ready" : market.status === "preview" ? "Preview" : "Unavailable"}</StatusBadge></div>
+        <div className="balance-receipt__top"><span>RUSD ecash</span><StatusBadge tone={market.status === "online" ? "settled" : market.status === "connecting" ? "pending" : "recoverable"}>{balanceStatusLabel(market.status)}</StatusBadge></div>
         <div className="balance-receipt__amount"><strong>{fmt(market.balance)}</strong><span>RUSD</span></div>
         <p>Issued by {market.profile?.name ?? new URL(EVENT.mintUrl).host} · stored in this browser</p>
         {hasNoEcash ? (

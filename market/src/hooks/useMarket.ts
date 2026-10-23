@@ -30,6 +30,8 @@ export type MarketConnectionStatus = "connecting" | "online" | "offline" | "inco
 export type FaucetConnectionStatus = "loading" | "available" | "paused" | "unavailable" | "preview";
 
 const faucetClient = new FaucetClient(EVENT.faucet.origin);
+const MINT_RETRY_BASE_DELAY_MS = 3_000;
+const MINT_RETRY_MAX_DELAY_MS = 30_000;
 
 interface InitialState {
   snapshot: MarketSnapshot;
@@ -102,6 +104,16 @@ export function useMarket(role: MarketRole): MarketController {
   const [faucetReloadKey, setFaucetReloadKey] = useState(0);
   const snapshotRef = useRef(snapshot);
   const inFlightRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+
+  const triggerReconnect = useCallback(() => {
+    setReloadKey((value) => value + 1);
+  }, []);
+
+  const retryConnection = useCallback(() => {
+    reconnectAttemptRef.current = 0;
+    triggerReconnect();
+  }, [triggerReconnect]);
 
   const commit = useCallback((next: MarketSnapshot) => {
     if (!PREVIEW_MODE) saveMarketSnapshot(EVENT, next);
@@ -120,6 +132,7 @@ export function useMarket(role: MarketRole): MarketController {
   useEffect(() => {
     if (PREVIEW_MODE) return;
     let cancelled = false;
+    let retryTimer: number | undefined;
     setWallet(null);
     setProfile(null);
     setStatus("connecting");
@@ -133,6 +146,7 @@ export function useMarket(role: MarketRole): MarketController {
     void nextWallet.load().then(() => {
       if (cancelled) return;
       if (nextWallet.unit.toLowerCase() !== EVENT.unit) {
+        reconnectAttemptRef.current = 0;
         setStatus("incompatible");
         setProfile(nextWallet.profile);
         setConnectionError(`This mint advertises ${nextWallet.ticker}, not RUSD. Stored value was not changed.`);
@@ -140,19 +154,37 @@ export function useMarket(role: MarketRole): MarketController {
       }
       setWallet(nextWallet);
       setProfile(nextWallet.profile);
+      reconnectAttemptRef.current = 0;
       setStatus("online");
     }).catch((reason: unknown) => {
       if (cancelled) return;
       if (reason instanceof MintCompatibilityError) {
+        reconnectAttemptRef.current = 0;
         setStatus("incompatible");
         try { setProfile(nextWallet.profile); } catch { setProfile(null); }
       } else {
         setStatus("offline");
+        const attempt = reconnectAttemptRef.current++;
+        const delay = Math.min(MINT_RETRY_BASE_DELAY_MS * (2 ** attempt), MINT_RETRY_MAX_DELAY_MS);
+        retryTimer = window.setTimeout(triggerReconnect, delay);
       }
       setConnectionError(describe(reason));
     });
-    return () => { cancelled = true; };
-  }, [reloadKey]);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [reloadKey, triggerReconnect]);
+
+  useEffect(() => {
+    if (PREVIEW_MODE || status !== "offline") return;
+    window.addEventListener("online", triggerReconnect);
+    window.addEventListener("focus", triggerReconnect);
+    return () => {
+      window.removeEventListener("online", triggerReconnect);
+      window.removeEventListener("focus", triggerReconnect);
+    };
+  }, [status, triggerReconnect]);
 
   useEffect(() => {
     if (PREVIEW_MODE) return;
@@ -332,7 +364,7 @@ export function useMarket(role: MarketRole): MarketController {
     faucetConfig,
     faucetStatus,
     faucetError,
-    retryConnection: () => setReloadKey((value) => value + 1),
+    retryConnection,
     retryFaucet: () => setFaucetReloadKey((value) => value + 1),
     reviewPayment,
     confirmPayment,

@@ -1,4 +1,5 @@
 import { expect, test, type BrowserContext, type Page, type Route } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import {
   createBlindSignature,
   deriveKeysetId,
@@ -28,6 +29,9 @@ interface SharedServices {
   faucetQuoteIds?: string[];
   faucetFailure?: boolean;
   faucetEnabled?: boolean;
+  faucetRemainingToday?: number;
+  mintInfoDelayMs?: number;
+  mintInfoFailures?: number;
 }
 
 const uncaughtErrors = new WeakMap<Page, string[]>();
@@ -90,7 +94,7 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
           network: "testnet",
           mint: "http://127.0.0.1:5175",
           cooldownSeconds: 86400,
-          remainingToday: 24,
+          remainingToday: shared.faucetRemainingToday ?? 24,
         } });
       }
       if (path === "/v1/claims" && request.method() === "POST") {
@@ -156,6 +160,11 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
       return route.fulfill({ status: 404, headers: cors(route), json: { error: "synthetic_not_found" } });
     }
     if (path === "/v1/info") {
+      if (shared.mintInfoDelayMs) await new Promise((resolve) => setTimeout(resolve, shared.mintInfoDelayMs));
+      if ((shared.mintInfoFailures ?? 0) > 0) {
+        shared.mintInfoFailures = (shared.mintInfoFailures ?? 0) - 1;
+        return route.abort("connectionreset");
+      }
       return route.fulfill({ json: {
         name: "CKB Community Test Mint",
         pubkey: mintKey,
@@ -297,6 +306,41 @@ test("publishes branded sharing metadata and icons", async ({ page }) => {
   await expect(page.locator('link[rel="icon"][type="image/svg+xml"]')).toHaveAttribute("href", "/favicon.svg");
   const favicon = await page.request.get("/favicon.svg");
   expect(favicon.ok()).toBe(true);
+});
+
+test("deployment policy blocks unapproved executable content and network origins", () => {
+  const deployment = JSON.parse(readFileSync(new URL("../vercel.json", import.meta.url), "utf8")) as {
+    headers: Array<{ headers: Array<{ key: string; value: string }> }>;
+  };
+  const policy = deployment.headers
+    .flatMap((entry) => entry.headers)
+    .find((header) => header.key === "Content-Security-Policy")?.value;
+
+  expect(policy).toContain("default-src 'self'");
+  expect(policy).toContain("script-src 'self'");
+  expect(policy).toContain("object-src 'none'");
+  expect(policy).toContain("frame-ancestors 'none'");
+  expect(policy).toContain("https://mint.fibernuts.xyz");
+  expect(policy).toContain("https://pay.fibernuts.xyz");
+  expect(policy).toContain("https://claim.fibernuts.xyz");
+  expect(policy).not.toContain("'unsafe-inline'");
+  expect(policy).not.toContain("'unsafe-eval'");
+});
+
+test("claim availability uses singular grammar", async ({ page }) => {
+  const shared: SharedServices = {
+    payload: null,
+    orderId: null,
+    vendorSettled: false,
+    acknowledged: false,
+    faucetRemainingToday: 1,
+  };
+  await mockServices(page.context(), shared);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Claim 10.00 test RUSD" }).click();
+  await expect(page.getByText("1 claim left today")).toBeVisible();
+  await expect(page.getByText("1 claims left today")).toHaveCount(0);
 });
 
 for (const viewport of viewports) {
@@ -641,6 +685,24 @@ test("offline mint state preserves local value and disables payment", async ({ p
   await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Scan to pay" })).toBeDisabled();
   await expect(page.locator(".balance-receipt__amount strong")).toHaveText("10.24");
+});
+
+test("mint status distinguishes checking and recovers after a transient failure", async ({ page }) => {
+  const shared: SharedServices = {
+    payload: null,
+    orderId: null,
+    vendorSettled: false,
+    acknowledged: false,
+    mintInfoDelayMs: 300,
+    mintInfoFailures: 2,
+  };
+  await mockServices(page.context(), shared);
+  await page.goto("/");
+
+  const status = page.locator(".balance-receipt__top").getByText(/Checking|Unavailable|Ready/);
+  await expect(status).toHaveText("Checking");
+  await expect(status).toHaveText("Unavailable");
+  await expect(status).toHaveText("Ready", { timeout: 7_000 });
 });
 
 test("corrupt stored state fails closed while leaving the event readable", async ({ page }) => {

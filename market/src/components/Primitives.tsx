@@ -11,9 +11,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
-import { useId, useState, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from "react";
+import { useId, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 export type Tone = "neutral" | "pending" | "settled" | "failed" | "recoverable";
+type QrPanelSize = 190 | 206 | 220;
 
 const TONE_ICON: Record<Tone, LucideIcon> = {
   neutral: Info,
@@ -113,10 +114,10 @@ export function CopyButton({ value, label = "Copy" }: { value: string; label?: s
   );
 }
 
-export function QrPanel({ value, label, size = 220 }: { value: string; label: string; size?: number }) {
+export function QrPanel({ value, label, size = 220 }: { value: string; label: string; size?: QrPanelSize }) {
   return (
     <div className="qr-panel">
-      <div className="qr-panel__code" style={{ "--qr-size": `${size}px` } as CSSProperties}>
+      <div className="qr-panel__code" data-qr-size={size}>
         <QRCodeSVG value={value} size={size} level="M" marginSize={2} title={`${label} QR code`} />
       </div>
       <code className="qr-panel__preview">{value.slice(0, 22)}...{value.slice(-8)}</code>

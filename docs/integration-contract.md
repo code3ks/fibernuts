@@ -244,6 +244,13 @@ tolerantly.
 and errors with `"<field> does not match the invoice"` if you pass a conflicting value. So pass
 **only** `invoice` on the melt path.
 
+That merge is routing behavior, not an asset policy. A Fiber node will attempt to pay any invoice
+it can route. Before requesting a dry run, `cdk-fiber` therefore compares the decoded invoice
+currency with `FiberConfig::currency` and decodes the Molecule bytes in the single `udt_script`
+attribute for exact comparison with `FiberConfig::udt_type_script`. Missing, malformed, duplicate,
+native-CKB, different-UDT, and wrong-network values fail before the route probe. This check is the
+mint's defense against burning RUSD ecash to pay a different asset.
+
 ---
 
 ## 7. Wire encoding

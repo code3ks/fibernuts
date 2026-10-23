@@ -204,6 +204,10 @@ function ClaimTestCash({ market, mintName, initialOperationId, onBack }: { marke
   }
 
   const configuredAmount = market.faucetConfig?.amount;
+  const remainingClaims = market.faucetConfig?.remainingToday;
+  const remainingClaimsLabel = remainingClaims === undefined
+    ? "-- claims left today"
+    : `${remainingClaims} ${remainingClaims === 1 ? "claim" : "claims"} left today`;
   return (
     <div className="flow-column flow-enter">
       <ScreenHeading eyebrow="Community testnet claim" title={configuredAmount ? `Claim ${fmt(configuredAmount)} test RUSD` : "Claim test RUSD"}>Start with enough ecash to try the Community Market without operating a Fiber node.</ScreenHeading>
@@ -211,7 +215,7 @@ function ClaimTestCash({ market, mintName, initialOperationId, onBack }: { marke
         <div><span>Amount</span><strong>{configuredAmount ? fmt(configuredAmount) : "--"} RUSD</strong></div>
         <div><span>Network</span><strong>{EVENT.networkLabel}</strong></div>
         <div><span>Issuer</span><strong>{mintName}</strong></div>
-        <div><span>Availability</span><strong>{market.faucetConfig?.remainingToday ?? "--"} claims left today</strong></div>
+        <div><span>Availability</span><strong>{remainingClaimsLabel}</strong></div>
       </section>
       <Notice tone="neutral" title="Testnet value only">FiberNuts pays one mint invoice from a project-operated node. The mint remains custodial, and this RUSD has no monetary value.</Notice>
       <p className="claim-privacy">Rate limited per browser and network address. Claim activity is counted in aggregate and is not linked to later Cashu spending.</p>

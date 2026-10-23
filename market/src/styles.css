@@ -344,7 +344,9 @@ svg { flex: 0 0 auto; }
 .charge-ticket__items { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 12px; margin-bottom: 13px; color: var(--ink-muted); font-size: 12px; }
 .settlement-stamp { width: fit-content; display: flex; align-items: center; gap: 8px; margin: 18px auto 5px; border: 2px solid var(--settled); border-radius: 5px; padding: 7px 10px; color: var(--settled); font-family: var(--font-mono); font-size: 11px; font-weight: 700; text-transform: uppercase; transform: rotate(-2deg); }
 .qr-panel { display: grid; justify-items: center; gap: 10px; min-width: 0; }
-.qr-panel__code { width: min(100%, calc(var(--qr-size) + 20px)); aspect-ratio: 1; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: #fff; padding: 10px; }
+.qr-panel__code { --qr-size: 220px; width: min(100%, calc(var(--qr-size) + 20px)); aspect-ratio: 1; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: #fff; padding: 10px; }
+.qr-panel__code[data-qr-size="190"] { --qr-size: 190px; }
+.qr-panel__code[data-qr-size="206"] { --qr-size: 206px; }
 .qr-panel__code svg { width: min(100%, var(--qr-size)); height: auto; aspect-ratio: 1; display: block; }
 .qr-panel__preview { max-width: 100%; overflow: hidden; color: var(--ink-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .copy-button { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--border-strong); border-radius: 5px; color: var(--ink); background: var(--surface); padding: 8px 12px; font-size: 11px; font-weight: 700; }

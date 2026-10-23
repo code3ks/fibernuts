@@ -57,6 +57,23 @@ pub enum Error {
     #[error("fiber invoice carries no amount")]
     AmountlessInvoice,
 
+    /// A Fiber invoice belongs to a different chain than the configured Fiber node.
+    #[error("fiber invoice network `{invoice}` does not match configured network `{configured}`")]
+    InvoiceNetworkMismatch {
+        /// The network configured for this payment backend.
+        configured: String,
+        /// The network encoded by the supplied invoice.
+        invoice: String,
+    },
+
+    /// A Fiber invoice's Molecule-encoded UDT script could not be decoded unambiguously.
+    #[error("fiber invoice carries an invalid asset script")]
+    InvalidInvoiceAsset,
+
+    /// A Fiber invoice is not denominated in the exact asset configured for this backend.
+    #[error("fiber invoice asset does not match the configured settlement asset")]
+    InvoiceAssetMismatch,
+
     /// The mint looked a payment up by something other than its payment hash.
     #[error("cdk-fiber identifies payments by payment hash, got {0}")]
     UnsupportedIdentifier(String),

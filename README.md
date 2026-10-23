@@ -142,7 +142,7 @@ The processor is configured by environment — `FIBERNUTS_FIBER_RPC`, `FIBERNUTS
 
 ## Money safety
 
-A mint that mishandles an ambiguous payment loses money. Four rules, each a named test:
+A mint that mishandles an ambiguous payment loses money. Five rules, each a named test:
 
 - **Only `Paid` credits a wallet.** A Fiber invoice in `Received` has a TLC against it that has
   *not* settled. Crediting there mints ecash against money the mint does not hold.
@@ -151,6 +151,9 @@ A mint that mishandles an ambiguous payment loses money. Four rules, each a name
 - **A payment the node never saw is `Unknown`, never `Failed`.**
 - **A retried melt never dispatches a second TLC.** Fiber refuses to re-send a payment hash whose
   session is not `Failed`, so the backend reports the existing session instead.
+- **A melt invoice must encode the configured network and exact settlement asset.** A wrong-network,
+  native-CKB, malformed, or different-UDT invoice is rejected before the route probe and before any
+  wallet proofs can be reserved.
 
 Rounding follows the same principle: funds **received** round down, amounts **charged** round up.
 

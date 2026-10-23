@@ -1,34 +1,29 @@
 # Security Policy
 
-## Supported Versions
+## Supported Scope
 
-FiberNuts is protocol software under active development. The reference deployment is testnet-only
-and has not received a formal security audit. Use at your own risk.
+The `main` branch and the public reference deployment are under active development. The reference
+deployment is testnet-only and has not received a formal security audit. FiberNuts does not support
+mainnet or real-value use at this time.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| main    | :white_check_mark: |
+## Reporting A Vulnerability
 
-## Reporting a Vulnerability
+Please use [GitHub private vulnerability reporting](https://github.com/code3ks/fibernuts/security/advisories/new).
+Do not open a public issue for an undisclosed vulnerability.
 
-If you discover a security vulnerability, please:
+If private reporting is unavailable, contact `@code3ks` on Telegram only to arrange a private
+reporting channel. Do not send exploit details or sensitive payment material in the initial message.
 
-1. **DO NOT** open a public issue
-2. Email security concerns to the maintainers
-3. Include detailed steps to reproduce
-4. Allow reasonable time for a fix before disclosure
+Include the affected component and version, reproduction steps using synthetic or testnet data,
+the expected impact, and any suggested mitigation. Allow reasonable time for investigation before
+public disclosure.
 
-## Security Considerations
+## Sensitive Material
 
-- This project handles cryptocurrency transactions
-- Private keys are stored encrypted locally
-- Never share your `ckb/key` or `fiber/sk` files
-- Always backup your keys before upgrading
-- Test on testnet before using with real funds
+Never include real Cashu proofs, encoded tokens, Fiber invoices tied to users, quote identifiers,
+mnemonics, seed phrases, private keys, node keys, credentials, or production customer data in a
+report. Redact logs and screenshots before attaching them.
 
-## Best Practices
-
-- Keep your Fiber node updated
-- Use strong passwords for key encryption
-- Monitor your channel balances regularly
-- Close unused channels to free up liquidity
+Browser proofs and payment keys are currently stored in origin-local browser storage. They are
+bearer secrets, are not encrypted by FiberNuts, and are not a recoverable backup. The mint remains
+custodial and controls issuance and redemption.

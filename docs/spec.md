@@ -79,10 +79,13 @@ without linking a claim to later Cashu transfers.
 ### Melt (wallet spends ecash to a Fiber invoice)
 
 1. Wallet asks for a melt quote: `POST /v1/melt/quote/fiber`, carrying a Fiber invoice.
-2. `cdk-fiber` calls `send_payment` with `dry_run: true`. The node builds a real route and returns
+2. `cdk-fiber` decodes the invoice and requires the configured Fiber network and exact RUSD UDT
+   type script. Native CKB, another UDT, malformed or duplicate asset attributes, and wrong-network
+   invoices fail before a quote is created.
+3. `cdk-fiber` calls `send_payment` with `dry_run: true`. The node builds a real route and returns
    the fee it *would* pay, without dispatching a TLC. No route ⇒ the quote is rejected.
-3. The quoted fee is that routed fee plus a cushion, rounded up, floored at a minimum.
-4. Wallet submits proofs. `cdk-fiber` dispatches the payment and polls to a terminal state.
+4. The quoted fee is that routed fee plus a cushion, rounded up, floored at a minimum.
+5. Wallet submits proofs. `cdk-fiber` dispatches the payment and polls to a terminal state.
 
 ### Failure states
 
@@ -139,6 +142,8 @@ implementation is exercised against a scripted mock. Nothing `make ci` runs touc
 
 The suite encodes the invariants above as named tests — among them
 `a_received_invoice_does_not_credit_the_wallet`,
+`a_wrong_network_melt_invoice_is_rejected_before_route_probe`,
+`a_different_udt_melt_invoice_is_rejected_before_route_probe`,
 `a_melt_that_never_settles_reports_pending_never_failed`,
 `an_outgoing_payment_the_node_never_saw_is_unknown_not_failed`,
 `an_in_flight_melt_is_never_dispatched_twice`, and
