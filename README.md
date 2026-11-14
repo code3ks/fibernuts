@@ -197,6 +197,18 @@ versions.
 The Fiber wire types are hand-rolled rather than taken from the published `fiber-json-types`, which
 drags in the `ckb-*` tree — 412 transitive packages and an MSRV of Rust 1.95 — for four structs.
 
+## Protocol references
+
+- [`docs/spec.md`](docs/spec.md) defines the money flows, units, and protocol boundary.
+- [`docs/integration-contract.md`](docs/integration-contract.md) records the load-bearing CDK and
+  Fiber behavior verified by the current adapter.
+- [`docs/compatibility.md`](docs/compatibility.md) separates the tested baseline from pinned stable,
+  hosted-LSP, and browser-wallet targets.
+- [`docs/failure-model.md`](docs/failure-model.md) defines authoritative state, recovery rules, and
+  the settlement, signer, browser-key, and refund threat model.
+- [`docs/mainnet-validation.md`](docs/mainnet-validation.md) records the mainnet RUSD identity and
+  the no-go-by-default validation gate.
+
 ## Roadmap
 
 - Fold `deploy/devnet.md` into a single `make demo` target.
