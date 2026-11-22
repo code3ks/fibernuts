@@ -26,3 +26,7 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Atomic settlement recovery plus online backup. 0.40+ requires Rust 1.89; this workspace pins
+# Rust 1.88. Bundling SQLite keeps the journal's STRICT/WAL behavior consistent across operators.
+rusqlite = { version = "=0.39.0", default-features = false, features = ["backup", "bundled"] }
+tempfile = "3"

@@ -92,6 +92,17 @@ historical side is unsupported.
 - The 0.10.1 payment RPC adds `payment_preimage` on successful payments. Older stored responses
   without it remain accepted, but only a `Success` response may produce CDK `payment_proof`.
 
+### First journal-backed processor start
+
+- The processor journal is not reconstructed from the CDK mint database or Fiber store. Before the
+  first journal-backed start, stop creating quotes and wait for every existing add-cash and cash-out
+  quote to become terminal.
+- Back up the mint database, Fiber store, and processor data together. Resume with a persistent
+  journal path only after the pre-journal queue is empty.
+- A terminal Fiber result without its durable quote, principal, and hash binding fails closed. Do
+  not bypass that check to migrate an unresolved legacy quote; keep the previous deployment
+  available until the quote resolves or perform an explicit operator reconciliation.
+
 ## Hosted-LSP target
 
 The hosted path is isolated behind a typed adapter. The pinned upstream revision supplies tenant

@@ -18,6 +18,10 @@ pub fn rusd_testnet_script() -> Script {
 /// How the backend talks to its Fiber node and prices what it settles.
 #[derive(Debug, Clone)]
 pub struct FiberConfig {
+    /// Canonical public URL of the Cashu mint this processor serves. Journal records are bound to
+    /// this URL so a database cannot be reused silently for another issuer.
+    pub mint_url: String,
+
     /// The unit the mint issues. It must resolve to the same normalized CDK currency unit as
     /// `[payment_backend].unit` and the gRPC processor's `supported_units` allowlist.
     pub unit: CurrencyUnit,
@@ -51,6 +55,7 @@ impl FiberConfig {
     /// The defaults fibernuts ships: RUSD on testnet, one ecash unit per RUSD cent.
     pub fn rusd_testnet() -> Self {
         Self {
+            mint_url: "http://127.0.0.1:8085".into(),
             unit: CurrencyUnit::custom("rusd"),
             currency: Currency::Fibt,
             udt_type_script: Some(rusd_testnet_script()),

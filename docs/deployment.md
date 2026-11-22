@@ -76,6 +76,8 @@ needs:
 - **TLS + a domain** in front of `cdk-mintd`, and a real `mnemonic` kept safe (it seeds the mint's
   signing keys — lose it and you can't honor outstanding ecash).
 - **Backups** of the mint database (it records which quotes were paid and which proofs were spent).
+- **Backups** of the processor settlement journal (it records stable quote/payment correlation and
+  every nonterminal recovery intent). It is required alongside, not instead of, the mint database.
 - **Monitoring** of channel balances and the processor↔node link.
 
 None of that changes `cdk-fiber`; it's the ordinary cost of running a payment service.

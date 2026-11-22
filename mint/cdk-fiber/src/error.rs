@@ -2,9 +2,15 @@
 
 use thiserror::Error;
 
+use crate::journal::JournalError;
+
 /// Everything that can go wrong between the mint and the Fiber node.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Durable settlement correlation could not be read or updated safely.
+    #[error(transparent)]
+    Journal(#[from] JournalError),
+
     /// The HTTP request to the node never produced a JSON-RPC response.
     #[error("fiber node unreachable: {0}")]
     Transport(String),
@@ -78,6 +84,14 @@ pub enum Error {
     #[error("fiber invoice asset does not match the configured settlement asset")]
     InvoiceAssetMismatch,
 
+    /// A Fiber payment response referred to a different payment than the requested operation.
+    #[error("fiber payment response does not match the requested payment")]
+    PaymentHashMismatch,
+
+    /// A terminal money result could not be tied to its durable quote and principal.
+    #[error("terminal Fiber payment has no durable settlement operation")]
+    MissingSettlementOperation,
+
     /// The mint looked a payment up by something other than its payment hash.
     #[error("cdk-fiber identifies payments by payment hash, got {0}")]
     UnsupportedIdentifier(String),
@@ -90,5 +104,11 @@ pub enum Error {
 impl From<Error> for cdk_common::payment::Error {
     fn from(e: Error) -> Self {
         Self::Backend(Box::new(e))
+    }
+}
+
+impl From<JournalError> for cdk_common::payment::Error {
+    fn from(e: JournalError) -> Self {
+        Self::from(Error::Journal(e))
     }
 }

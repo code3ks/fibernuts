@@ -270,7 +270,7 @@ failure, timeout, retry, and panic/error formatting paths.
 | Only `Paid` authorizes incoming settlement | Tested | Preserve through stable upgrade and restart journal |
 | Timeout/unknown never becomes failed cash-out | Tested | Add durable reconciliation and delayed-terminal event recovery |
 | Exact network and UDT validation | Tested | Re-verify on stable Fiber and mainnet preflight |
-| Incoming/outgoing operation journal | Partial local operation state | Durable processor journal with fault injection |
+| Incoming/outgoing operation journal | Durable scoped schema, atomic intent, recovery ordering, backup/retention tests | Wire journal recovery into incoming/outgoing reconcilers and fault injection |
 | Outgoing token redisplay/reclaim | Implemented in reference browser flows | Reload, multi-tab, mint-refusal, and safe-reclaim coverage |
 | Hosted tenant and remote signer | Not shipped | Pinned upstream adapter plus public-testnet security gate |
 | Browser wallet funding | Not shipped | JoyID/CCC witness-only external funding with interruption tests |

@@ -26,7 +26,7 @@ use cdk_common::{Amount, CurrencyUnit, QuoteId};
 use serde_json::{json, Value};
 
 use cdk_fiber::wire::{Currency, Script};
-use cdk_fiber::{FiberBackend, FiberConfig, HttpFiberRpc};
+use cdk_fiber::{FiberBackend, FiberConfig, HttpFiberRpc, SettlementJournal};
 
 const SCALE: u64 = 1_000_000;
 /// 25 ecash units, i.e. $0.25 at cent granularity.
@@ -77,7 +77,9 @@ fn backend(rpc_url: &str) -> FiberBackend {
             payment_timeout: Duration::from_secs(20),
             ..FiberConfig::rusd_testnet()
         },
+        Arc::new(SettlementJournal::in_memory().expect("test journal")),
     )
+    .expect("backend scope")
 }
 
 /// A raw JSON-RPC call, used only for the things cdk-fiber deliberately cannot do — such as

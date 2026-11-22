@@ -2,14 +2,14 @@
 //! protocol, so a stock `cdk-mintd` can settle a Cashu mint over the Fiber Network.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use cdk_common::payment::MintPayment;
 use cdk_common::CurrencyUnit;
 use cdk_fiber::config::rusd_testnet_script;
 use cdk_fiber::wire::{Currency, Script};
-use cdk_fiber::{FiberBackend, FiberConfig};
+use cdk_fiber::{FiberBackend, FiberConfig, SettlementJournal};
 use cdk_payment_processor::PaymentProcessorServer;
 use tokio::signal;
 
@@ -66,6 +66,7 @@ fn load_config() -> Result<FiberConfig> {
     );
 
     Ok(FiberConfig {
+        mint_url: env_or("FIBERNUTS_MINT_URL", "http://127.0.0.1:8085"),
         unit: CurrencyUnit::custom(unit),
         currency: currency_from(&env_or("FIBERNUTS_NETWORK", "testnet"))?,
         udt_type_script: udt_script()?,
@@ -92,17 +93,33 @@ async fn main() -> Result<()> {
     // `[grpc_processor].address` as a bare host and chooses the scheme from its TLS policy.
     let listen_addr = env_or("FIBERNUTS_LISTEN_ADDR", "127.0.0.1");
     let listen_port: u16 = env_parse("FIBERNUTS_LISTEN_PORT", 50051u16)?;
+    let journal_path = std::env::var("FIBERNUTS_JOURNAL_PATH")
+        .context("FIBERNUTS_JOURNAL_PATH must point to persistent processor storage")?;
+    let retention_secs: u64 = env_parse("FIBERNUTS_JOURNAL_RETENTION_SECS", 7_776_000u64)?;
 
     let config = load_config()?;
+    let journal = Arc::new(
+        SettlementJournal::open(&journal_path)
+            .with_context(|| format!("could not open settlement journal at {journal_path}"))?,
+    );
+    let backend = FiberBackend::http(rpc_url.clone(), config.clone(), journal.clone())
+        .context("could not initialize the Fiber settlement journal scope")?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let pruned = journal
+        .prune_terminal_before(now.saturating_sub(retention_secs))
+        .context("could not apply settlement journal retention")?;
     tracing::info!(
         %rpc_url,
         unit = %config.unit,
         scale = config.unit_scale,
         udt = config.udt_type_script.is_some(),
+        pruned_terminal_operations = pruned,
         "starting fibernuts-processor"
     );
 
-    let backend = FiberBackend::http(rpc_url, config);
     backend
         .start()
         .await

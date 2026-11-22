@@ -121,6 +121,9 @@ unambiguous.
 | variable | default | meaning |
 |---|---|---|
 | `FIBERNUTS_FIBER_RPC` | `http://127.0.0.1:8227` | the Fiber node's JSON-RPC endpoint |
+| `FIBERNUTS_MINT_URL` | `http://127.0.0.1:8085` | canonical mint URL bound into durable operation scope |
+| `FIBERNUTS_JOURNAL_PATH` | required | persistent SQLite settlement journal path |
+| `FIBERNUTS_JOURNAL_RETENTION_SECS` | `7776000` | retention for terminal records only (90 days) |
 | `FIBERNUTS_LISTEN_ADDR` | `127.0.0.1` | gRPC bind address (a **bare IP**) |
 | `FIBERNUTS_LISTEN_PORT` | `50051` | gRPC port |
 | `FIBERNUTS_UNIT` | `rusd` | the ecash unit; must be lowercase |
@@ -132,6 +135,17 @@ unambiguous.
 | `FIBERNUTS_MIN_FEE_RESERVE` | `1` | floor on the melt fee, in ecash units |
 | `FIBERNUTS_POLL_SECS` | `3` | invoice/payment poll interval |
 | `FIBERNUTS_PAYMENT_TIMEOUT_SECS` | `60` | how long a melt waits before reporting `Pending` |
+
+The processor journal is correlation and recovery state, not settlement authority. It commits an
+outgoing quote and stable attempt identity before dispatch, and records incoming quote/hash binding
+before returning an invoice to CDK. On restart it reconstructs nonterminal work in deterministic
+order, but only a fresh Fiber invoice or payment query can authorize a terminal money state.
+Terminal settlement without the matching durable quote, principal, and payment-hash binding fails
+closed; node-reported amounts never replace that durable economic intent. Conflicting quote/hash
+reuse, corrupt rows, a different configured mint or asset, and newer schema versions also fail
+closed. The journal excludes proofs, Cashu tokens, payment preimages, mnemonics, and signing keys.
+SQLite online backups are integrity-checked, restores refuse to overwrite an existing database, and
+retention never removes nonterminal operations.
 
 `cdk-mintd` 0.18 stores its active configuration in the mint database. Import
 `deploy/mintd.config.toml` with `config init` for a new work directory, and use `config apply` for a

@@ -388,7 +388,10 @@ impl std::fmt::Debug for PaymentResult {
             )
             .field("status", &self.status)
             .field("fee", &self.fee)
-            .field("failed_error", &self.failed_error)
+            .field(
+                "failed_error",
+                &self.failed_error.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -462,19 +465,21 @@ mod tests {
     }
 
     #[test]
-    fn payment_result_debug_redacts_the_preimage() {
+    fn payment_result_debug_redacts_sensitive_response_details() {
         // Synthetic fixture: never use or record a real payment preimage in tests.
         let preimage = format!("0x{}", "22".repeat(32));
+        let failure_detail = "synthetic invoice-linked failure detail".to_string();
         let payment = PaymentResult {
             payment_hash: format!("0x{}", "11".repeat(32)),
             payment_preimage: Some(preimage.clone()),
             status: PaymentStatus::Success,
             fee: 0,
-            failed_error: None,
+            failed_error: Some(failure_detail.clone()),
         };
 
         let debug = format!("{payment:?}");
         assert!(!debug.contains(&preimage));
+        assert!(!debug.contains(&failure_detail));
         assert!(debug.contains("[REDACTED]"));
     }
 

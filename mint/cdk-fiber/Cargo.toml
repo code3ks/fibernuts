@@ -17,9 +17,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+rusqlite.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 serde_json.workspace = true
 futures.workspace = true
 async-trait.workspace = true
+tempfile.workspace = true
