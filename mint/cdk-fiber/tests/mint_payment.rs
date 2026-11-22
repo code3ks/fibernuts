@@ -1,7 +1,7 @@
 //! The `MintPayment` contract, exercised against a scripted node.
 //!
 //! These tests encode the invariants that keep a mint solvent. Each one corresponds to a
-//! behaviour of the real Fiber node that was verified against fnn 0.9.0-rc2 / v0.9.0-rc7 source.
+//! behaviour of the real Fiber node verified against the pinned stable Fiber source.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -64,9 +64,18 @@ fn invoice_with(
 fn payment(status: PaymentStatus, fee: u128) -> PaymentResult {
     PaymentResult {
         payment_hash: HASH_HEX.to_string(),
+        payment_preimage: None,
         status,
         fee,
         failed_error: None,
+    }
+}
+
+fn payment_with_preimage(status: PaymentStatus, fee: u128) -> PaymentResult {
+    PaymentResult {
+        // Synthetic fixture: never use or record a real payment preimage in tests.
+        payment_preimage: Some(format!("0x{}", "42".repeat(32))),
+        ..payment(status, fee)
     }
 }
 
@@ -187,7 +196,7 @@ fn backend(script: Script) -> (FiberBackend, Arc<MockNode>) {
 }
 
 fn rusd() -> CurrencyUnit {
-    CurrencyUnit::Custom("rusd".to_string())
+    CurrencyUnit::Custom("rusd".into())
 }
 
 /// The gRPC bridge always delivers `method` as an empty string; mirror that here.
@@ -195,9 +204,23 @@ fn incoming(amount: u64, unit: CurrencyUnit) -> IncomingPaymentOptions {
     IncomingPaymentOptions::Custom(Box::new(CustomIncomingPaymentOptions {
         method: String::new(),
         description: Some("fibernuts".to_string()),
-        amount: Amount::new(amount, unit),
+        amount: Some(Amount::new(amount, unit)),
         unix_expiry: None,
         extra_json: None,
+        quote_id: QuoteId::new(),
+        pubkey: None,
+    }))
+}
+
+fn amountless_incoming() -> IncomingPaymentOptions {
+    IncomingPaymentOptions::Custom(Box::new(CustomIncomingPaymentOptions {
+        method: String::new(),
+        description: Some("fibernuts".to_string()),
+        amount: None,
+        unix_expiry: None,
+        extra_json: None,
+        quote_id: QuoteId::new(),
+        pubkey: None,
     }))
 }
 
@@ -205,6 +228,7 @@ fn outgoing(max_fee: Option<u64>) -> OutgoingPaymentOptions {
     OutgoingPaymentOptions::Custom(Box::new(CustomOutgoingPaymentOptions {
         method: String::new(),
         request: INVOICE.to_string(),
+        amount: None,
         max_fee_amount: max_fee.map(|f| Amount::new(f, rusd())),
         timeout_secs: None,
         melt_options: None,
@@ -219,8 +243,8 @@ fn hash_id() -> PaymentIdentifier {
 
 #[tokio::test]
 async fn settings_advertise_the_fiber_method_and_the_configured_unit() {
-    // cdk-mintd registers methods from the `custom` keys and aborts unless `unit` string-matches
-    // its own `[ln].unit`.
+    // cdk-mintd registers methods from the `custom` keys and requires `unit` to match its
+    // normalized `[payment_backend].unit`.
     let (backend, _) = backend(Script::default());
     let settings = backend.get_settings().await.unwrap();
 
@@ -271,6 +295,27 @@ async fn an_incoming_request_in_a_foreign_unit_is_rejected() {
         .create_incoming_payment_request(incoming(AMOUNT_ECASH, CurrencyUnit::Sat))
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn a_custom_unit_is_compared_in_its_normalized_form() {
+    let (backend, _) = backend(Script::default());
+    let manually_constructed = CurrencyUnit::Custom(" RUSD ".into());
+
+    assert!(backend
+        .create_incoming_payment_request(incoming(AMOUNT_ECASH, manually_constructed))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn an_amountless_incoming_request_is_rejected() {
+    let (backend, node) = backend(Script::default());
+    assert!(backend
+        .create_incoming_payment_request(amountless_incoming())
+        .await
+        .is_err());
+    assert!(node.recorded.lock().await.new_invoices.is_empty());
 }
 
 #[tokio::test]
@@ -447,8 +492,11 @@ async fn an_unroutable_melt_quote_is_rejected() {
 async fn a_successful_melt_reports_paid_and_charges_amount_plus_fee() {
     let fee = 2 * SCALE as u128;
     let (backend, _) = backend(Script {
-        get_payment: VecDeque::from(vec![None, Some(payment(PaymentStatus::Success, fee))]),
-        send_payment: Some(payment(PaymentStatus::Success, fee)),
+        get_payment: VecDeque::from(vec![
+            None,
+            Some(payment_with_preimage(PaymentStatus::Success, fee)),
+        ]),
+        send_payment: Some(payment_with_preimage(PaymentStatus::Success, fee)),
         ..Script::default()
     });
 
@@ -456,8 +504,7 @@ async fn a_successful_melt_reports_paid_and_charges_amount_plus_fee() {
 
     assert_eq!(result.status, MeltQuoteState::Paid);
     assert_eq!(result.total_spent.value(), AMOUNT_ECASH + 2);
-    // FNN never exposes the preimage, so there is no proof to hand back.
-    assert!(result.payment_proof.is_none());
+    assert_eq!(result.payment_proof, Some(format!("0x{}", "42".repeat(32))));
 }
 
 #[tokio::test]
@@ -577,12 +624,16 @@ async fn an_outgoing_payment_the_node_never_saw_is_unknown_not_failed() {
 #[tokio::test]
 async fn a_known_outgoing_payment_reports_its_state() {
     let (backend, _) = backend(Script {
-        get_payment: VecDeque::from(vec![Some(payment(PaymentStatus::Inflight, 0))]),
+        get_payment: VecDeque::from(vec![Some(payment_with_preimage(
+            PaymentStatus::Inflight,
+            0,
+        ))]),
         ..Script::default()
     });
 
     let result = backend.check_outgoing_payment(&hash_id()).await.unwrap();
     assert_eq!(result.status, MeltQuoteState::Pending);
+    // Even a malformed/malicious node response cannot expose a proof before terminal success.
     assert!(result.payment_proof.is_none());
 }
 

@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn unknown_payment_is_recognised_from_the_nodes_wording() {
-        // Verbatim from fnn 0.9.0-rc2.
+        // Preserved by the pinned Fiber v0.10.1 RPC implementation.
         assert!(is_unknown_payment(
             "InvalidParameter: Payment session not found: Hash256(0x1111)"
         ));

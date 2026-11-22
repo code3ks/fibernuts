@@ -1,9 +1,10 @@
 # The cdk ⇄ Fiber integration contract
 
-Everything `cdk-fiber` relies on, verified against **cdk `v0.17.2`** (commit `6132607`), **fiber
-`v0.9.0-rc7`** source, and a **live fnn `0.9.0-rc2`** testnet node. Nothing here is inferred from
-documentation; each claim cites the file that establishes it, and the traps were found by reading
-code that contradicts its own comments.
+Everything `cdk-fiber` relies on, verified against **CDK `v0.18.3`** (commit
+`b2035a3525c98b22226926bdc20fa128a1351ae5`) and **Fiber `v0.10.1`** (commit
+`d9b6bbd74faf5b168244e3ddea5b6762a04e0a71`). Historical live evidence used Fiber
+`v0.9.0-rc7` / fnn `v0.9.0-rc2` and CDK `v0.17.2`; it is labeled as historical wherever it is
+retained. Source-level and deterministic claims are not presented as a live stable deployment.
 
 Read this before changing anything in `mint/cdk-fiber/`.
 
@@ -38,21 +39,21 @@ payment_processor: Arc<dyn MintPayment<Err = cdk_common::payment::Error> + Send 
 
 Unsize coercion preserves associated types, so a backend with a custom `Err` can *never* become
 that trait object. **Set `type Err = cdk_common::payment::Error;`** and bridge your own error with
-`impl From<MyError> for payment::Error { Self::Lightning(Box::new(e)) }`.
+`impl From<MyError> for payment::Error { Self::Backend(Box::new(e)) }`.
 
 ---
 
 ## 2. Trap: the gRPC bridge silently drops `method`
 
 `CustomIncomingPaymentOptions` and `CustomOutgoingPaymentOptions` both carry a `method: String` in
-Rust. The protobuf has **no such field**. On the way back to Rust the server hardcodes it:
+Rust. The protobuf still has **no such field**. On the way back to Rust the server hardcodes it:
 
 ```rust
-// server.rs:234
+// create incoming
 method: "".to_string(),
-// server.rs:333
+// quote outgoing
 method: String::new(), // Will be set from variant
-// server.rs:456
+// make outgoing
 method: String::new(), // Method will be determined from context
 ```
 
@@ -66,12 +67,18 @@ surfaces as an opaque HTTP 500.
 Two more artefacts of the same bridge:
 
 - `CustomOutgoingPaymentOptions.request` travels in a proto field literally named `offer`
-  (`client.rs:331` → `server.rs:457`, `request: opts.offer`).
+  (`request: opts.offer` on the server).
 - `get_payment_quote`'s custom path hardcodes `max_fee_amount: None, timeout_secs: None`
-  (`server.rs:334`). Only `make_payment` preserves them. Quote-time fee reserve must be computed
-  by the backend, not read from the request.
+  while preserving the optional requested amount and mint-generated quote ID. Only `make_payment`
+  preserves fee and timeout. Quote-time fee reserve must be computed by the backend, not read from
+  the request.
 
-The **unit does** survive: `AmountMessage { value, unit }` (`payment_processor.proto:17`).
+The incoming bridge now also preserves a required mint quote ID and optional NUT-20 pubkey.
+`cdk-fiber` requires an incoming amount because FiberNuts issues fixed-value invoices; an absent
+amount fails before any Fiber RPC mutation. The **unit does** survive in `AmountMessage`.
+
+CDK 0.18 also attaches payment-processor protocol version `4.0.0` to every gRPC request and rejects
+an incompatible peer. The processor and stock mint therefore move together at exactly `0.18.3`.
 
 ---
 
@@ -109,11 +116,11 @@ Verified end to end. The mechanism is not the one the build plan assumed:
 | thing | where it comes from |
 |---|---|
 | the **method** (`fiber`) | the **backend**, as a key of `get_settings().custom` (`lib.rs:924`) |
-| the **unit** (`rusd`) | the **config**, `[ln].unit` (`lib.rs:709`) |
+| the **unit** (`rusd`) | `[payment_backend].unit`, allowed by `[grpc_processor].supported_units`, then matched against backend `get_settings().unit` |
 
-`get_settings().unit` is only used to *validate* the config's unit
-(`validate_backend_unit`, `lib.rs:977-1005`). It requires an **exact string match** for custom
-units — sat↔msat is the sole conversion. Mismatch aborts startup.
+`get_settings().unit` is parsed as a `CurrencyUnit` and then compared with the configured unit in
+`validate_backend_unit`. Custom names are trimmed, Unicode-normalized, and lowercased before that
+comparison; sat↔msat is the sole cross-unit conversion. A real unit mismatch aborts startup.
 
 `grpc-processor` is in `cdk-mintd`'s **default** cargo features (`Cargo.toml:14`), so a published
 `cdk-mintd` already has it.
@@ -122,27 +129,33 @@ Custom methods get parameterised axum routes (`cdk-axum/src/custom_router.rs:30`
 method `fiber` serves `/v1/mint/quote/fiber`, `/v1/melt/quote/fiber`, `/v1/mint/fiber`, and friends.
 Method names allow alphanumerics, `-`, `_`; `bolt11`/`bolt12`/`onchain` are reserved.
 
-### Config gotchas, both empirically confirmed
+### CDK 0.18 configuration boundaries
 
-- **`min_mint`/`max_mint`/`min_melt`/`max_melt` are mandatory** whenever an `[ln]` section exists in
-  the file. They have no serde default, and `Ln` is deserialized inside an untagged enum, so
-  omitting them yields the useless error
-  `data did not match any variant of untagged enum LnOneOrMany for key ln`.
-  The commented-out limits in `example.config.toml:121` are misleading.
-- **`[grpc_processor].addr` needs a URL scheme.** The client builds
-  `Channel::from_shared(format!("{addr}:{port}"))`, and tonic rejects a URI without one.
-  `example.config.toml:321` shows `addr = "127.0.0.1"`, which fails. Use `http://127.0.0.1`.
-- **Case matters.** `CurrencyUnit::from_str` does not uppercase custom units, but the
-  `CurrencyUnit::custom()` helper does. `Custom("rusd") != Custom("RUSD")` even though both render
-  as `"rusd"`. Use lowercase everywhere.
-- `ln_backend` is spelled `"grpcprocessor"` — no dash, no underscore. (`grpc-processor` is the
+- **`--config` is no longer a startup input.** A new mint imports a canonical document with
+  `config init --new-mint`; an existing mint uses `config init --existing-mint`. Later changes use
+  `config apply`, with `config rollback` available for the stored document.
+- **The canonical section is `[payment_backend]`.** The old `[ln]` form is migration input, not
+  the shipped runtime configuration. The four mint/melt limits now have defaults, but FiberNuts
+  sets them explicitly because they are economic policy.
+- **`[grpc_processor].address` is a bare host.** The client adds `http` or `https` according to
+  the TLS configuration. Supplying `http://` would create an invalid doubled scheme.
+- **Transport policy is explicit.** Set `tls_dir` for mTLS, or `allow_insecure = true`. FiberNuts
+  permits the latter only where both processes share loopback.
+- **`supported_units` cannot be empty.** CDK 0.18 validates a non-empty gRPC allowlist before
+  connecting. FiberNuts configures only `rusd`; the normalized backend response must still match.
+- **Secrets are references.** The shipped document uses
+  `mnemonic = "env:CDK_MINTD_MNEMONIC"`; a literal mnemonic is neither committed nor imported.
+- **Custom units are normalized in 0.18.** `CurrencyUnit::from_str`,
+  `CurrencyUnit::custom()`, and display trim and lowercase custom names. FiberNuts still writes the
+  canonical `rusd` spelling everywhere and compares the rendered boundary value.
+- `backend` is spelled `"grpcprocessor"` — no dash, no underscore. (`grpc-processor` is the
   *cargo feature* name.)
 
-### Server binds an IP; the client dials a URL
+### Both endpoints are configured as hosts
 
 `PaymentProcessorServer::new(processor, addr, port)` does `SocketAddr::new(addr.parse()?, port)` —
-a **bare IP**, no scheme. `cdk-mintd`'s `[grpc_processor].addr` is a **tonic URI** and needs
-`http://`. The same conceptual address is written two different ways.
+a **bare IP**, no scheme. CDK 0.18's client also accepts a bare
+`[grpc_processor].address` and adds the scheme itself.
 
 ### `start()` returns immediately
 
@@ -177,13 +190,17 @@ A mint must never hold, so `cdk-fiber` omits **both** fields. Confirmed live: a 
 
 `send_payment` and `get_payment` both return `GetPaymentCommandResult`.
 
-### The preimage is never exposed
+### A successful payment can expose its preimage
 
-No preimage field exists on the wire type or on the internal `SendPaymentResponse`, under any
-`cfg`. The node *has* it — `attempt.preimage = Some(fulfill.payment_preimage)`
-(`fiber/payment.rs:1794`) — but no RPC surfaces it. This is a deliberate gap, not an oversight.
+Fiber `v0.10.1` adds `payment_preimage: Option<Hash256>` to `GetPaymentCommandResult`.
+`send_payment_response_to_json` copies the preimage learned by a successful attempt into both
+`send_payment` and `get_payment` responses. The field is absent for pending, failed, unknown, and
+historical stored responses that do not contain one.
 
-Consequence: `MakePaymentResponse.payment_proof` is always `None`. `Option<String>` permits it.
+`cdk-fiber` returns that value as `MakePaymentResponse.payment_proof` only when Fiber reports
+`Success`. It remains optional so migrated or older records without a preimage can still be
+reported as paid. The preimage is bearer-sensitive: the wire type's `Debug` implementation redacts
+it, and tests assert the secret never appears in debug output.
 
 ### `dry_run: true` returns a real routed fee
 
@@ -277,9 +294,10 @@ Omitted optional fields decode as `None` — confirmed live with a minimal `new_
 
 ### Why the wire types are hand-rolled
 
-`fiber-json-types` is published (`0.9.0-rc7`) and carries these exact types. Depending on it pulls
-the `ckb-*` tree: **412 transitive packages**, and an MSRV of **Rust 1.95**, which fails to build on
-1.93. For four structs, `mint/cdk-fiber/src/wire.rs` re-declares them and tests the encodings.
+`fiber-json-types` `0.10.1` carries the upstream types, but even its default feature set pulls the
+broad `ckb-jsonrpc-types`, `ckb-types`, Molecule, and schema stack into the payment adapter. For the
+small RPC subset used here, `mint/cdk-fiber/src/wire.rs` re-declares the boundary and tests every
+load-bearing encoding and optional field against the pinned source.
 
 ---
 
@@ -305,8 +323,11 @@ args      0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b
 
 ## 9. Running against a dev chain
 
-Verified live on a `fiber-forge` devnet (`nervos/fiber:0.9.0-rc7`), three nodes, `simple_udt`
-channels. Four things differ from testnet, and each fails loudly or silently if missed.
+The stable integration was live-tested on 2026-11-22 with a three-node `fiber-forge` devnet, exact
+`nervos/fiber:0.10.1` images, stock `cdk-mintd 0.18.3`, and `simple_udt` channels. The adapter's
+three opt-in tests and a complete 200-unit mint / 100-unit cash-out cycle passed. These four devnet
+constraints remain load-bearing; every new live run must record its own exact versions rather than
+inheriting this result.
 
 - **The currency must match the chain.** `new_invoice` on a dev chain rejects `Fibt` with
   `Currency must be Fibd with the chain network` (`rpc/invoice.rs:175-184`, `fiber/config.rs:451`).
@@ -350,8 +371,9 @@ keyset.
 
 ## 11. Known limits
 
-- **`payment_proof` is always `None`.** Not a choice; FNN exposes no preimage. A mint that must
-  prove payment out-of-band cannot do so through this RPC surface.
+- **A paid result can still lack `payment_proof`.** Fiber `v0.10.1` normally exposes the successful
+  preimage, but the field is optional for migrated or older records. Paid state remains
+  authoritative; absence of an out-of-band proof does not turn settlement into failure.
 - **The event stream is best-effort.** `cdk-fiber` sweeps open invoices on an interval and emits
   `Event::PaymentReceived`. The watch set is in memory, so a restart forgets it. Correctness does
   not depend on the stream: `check_incoming_payment_status` is authoritative, and the mint calls it

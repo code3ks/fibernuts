@@ -33,8 +33,12 @@ that hostname.
 
 - For a **fresh test mint**, generate a new mnemonic and start with empty volumes.
 - To **preserve an existing mint**, keep its original `MINT_MNEMONIC`, `mintd-data`, and `fnn-data`.
-  Keep the old hostname reachable until every old token is redeemed or deliberately retired. Do not
-  delete the old Droplet or its volumes before testing restored balances, quotes, and redemption.
+  Before the first CDK 0.18 start set `MINT_CONFIG_INIT_MODE=existing-mint`; never use
+  `new-mint` against an existing liability set. Keep the old hostname reachable until every old
+  token is redeemed or deliberately retired. Do not delete the old Droplet or its volumes before
+  testing restored balances, quotes, and redemption.
+- Before upgrading an existing Fiber node to 0.10.1, stop the stack and back up `fnn-data` and
+  `faucet-fnn-data`. Do not run an older Fiber binary against a store migrated by 0.10.1.
 
 Changing the wallet's compiled default only affects new browser profiles. Returning browsers retain
 their selected mint URL in local storage and must explicitly switch mints; balances stay isolated by
@@ -145,16 +149,18 @@ cd fibernuts/deploy
 cp .env.example .env
 nano .env
 # Set MINT_DOMAIN, RELAY_DOMAIN, FAUCET_DOMAIN, MARKET_ALLOWED_ORIGINS,
-# MINT_MNEMONIC, and FAUCET_IDENTIFIER_SECRET.
+# MINT_MNEMONIC, and FAUCET_IDENTIFIER_SECRET. For an existing CDK 0.17 mint,
+# also set MINT_CONFIG_INIT_MODE=existing-mint before the first 0.18 start.
 chmod 600 .env
 
 sudo docker compose config --quiet
 sudo docker compose up -d --build
 ```
 
-Compose detects this server's public IP, builds the processor, relay, and faucet, pulls the fnn and
-mintd images, generates separate Fiber keys and configs on first boot, and obtains TLS certificates
-for all three API domains.
+Compose detects this server's public IP, builds the processor, relay, and faucet, pulls the pinned
+Fiber 0.10.1 and CDK 0.18.3 images, generates separate Fiber keys and configs on first boot,
+initializes mintd's database-backed configuration once, and obtains TLS certificates for all three
+API domains.
 
 Check it came up:
 
@@ -279,12 +285,22 @@ curl -fsS https://claim.fibernuts.xyz/v1/stats | jq
 
 ```sh
 sudo docker compose logs -f mintd         # mint activity
+sudo docker compose logs mintd-init       # first-run/import configuration result
 sudo docker compose logs -f processor     # cdk-fiber ↔ node (the only place backend errors surface)
 sudo docker compose logs -f relay         # status and errors; no request access log
 sudo docker compose logs -f faucet        # lifecycle errors only; quote identifiers are not logged
 sudo docker compose logs -f faucet-fnn    # payer routing and channel state
 sudo docker compose restart processor     # safe to restart; it reconnects
 sudo docker compose down                  # stop (volumes persist)
+```
+
+Editing `mintd.host.toml` after initialization does not change a running mint. Validate and store
+an intentional replacement, then restart:
+
+```sh
+sudo docker compose run --rm mintd-init \
+  cdk-mintd --work-dir /data config apply --file /config/config.toml
+sudo docker compose restart mintd
 ```
 
 ## If something's off
@@ -298,7 +314,8 @@ sudo docker compose down                  # stop (volumes persist)
 | claim remains in progress | inspect `faucet-fnn` payment state and channel outbound balance; resume the same claim instead of creating another. |
 | faucet payment has no route | the separate payer needs a ready RUSD channel with outbound balance toward the mint; verify `list_channels` on `faucet-fnn`. |
 | node not in the routing graph / nobody can pay | `PUBLIC_IP` wrong or `8228`/`8238` firewalled. Both announced P2P ports must be reachable. |
-| mintd exits: `data did not match any variant of untagged enum LnOneOrMany` | a required `[ln]` limit is missing from `mintd.host.toml`. All four min/max are mandatory. |
+| `mintd-init` fails on an existing database | set `MINT_CONFIG_INIT_MODE=existing-mint`, preserve the original mnemonic, and inspect `docker compose logs mintd-init`; never retry as `new-mint`. |
+| mintd reports no stored configuration | run `docker compose up mintd-init` and inspect its logs before starting mintd. |
 | mint quote fails with `Unit unsupported` | that's cdk's generic label for a backend/route failure — read `docker compose logs processor` for the real reason (usually no route / no liquidity). |
 | processor can't reach the node | the `network_mode: service:fnn` link — don't add `ports:` or `networks:` to processor/mintd; Docker rejects it and the loopback link breaks. |
 | build fails: Dockerfile path | your Docker is old; upgrade to Compose v2 / BuildKit, or run the build from the repo root. |

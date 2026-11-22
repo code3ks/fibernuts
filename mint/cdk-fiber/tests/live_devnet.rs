@@ -22,7 +22,7 @@ use cdk_common::nuts::MeltQuoteState;
 use cdk_common::payment::{
     CustomIncomingPaymentOptions, IncomingPaymentOptions, MintPayment, PaymentIdentifier,
 };
-use cdk_common::{Amount, CurrencyUnit};
+use cdk_common::{Amount, CurrencyUnit, QuoteId};
 use serde_json::{json, Value};
 
 use cdk_fiber::wire::{Currency, Script};
@@ -130,9 +130,11 @@ fn incoming(amount: u64) -> IncomingPaymentOptions {
         // The gRPC bridge always delivers this empty; mirror it.
         method: String::new(),
         description: Some("fibernuts live test".into()),
-        amount: Amount::new(amount, CurrencyUnit::Custom("rusd".into())),
+        amount: Some(Amount::new(amount, CurrencyUnit::Custom("rusd".into()))),
         unix_expiry: None,
         extra_json: None,
+        quote_id: QuoteId::new(),
+        pubkey: None,
     }))
 }
 
@@ -255,5 +257,8 @@ async fn a_payment_the_node_never_saw_is_unknown_not_failed() {
         "an unseen payment must read as Unknown; Failed would hand a wallet its proofs back"
     );
     assert_eq!(result.total_spent.value(), 0);
-    assert!(result.payment_proof.is_none(), "fnn exposes no preimage");
+    assert!(
+        result.payment_proof.is_none(),
+        "an unknown payment has no preimage"
+    );
 }

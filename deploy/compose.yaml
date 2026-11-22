@@ -37,7 +37,7 @@ services:
 
   # ── the Fiber node: public P2P, private loopback RPC ────────────────────────
   fnn:
-    image: nervos/fiber:0.9.0-rc7
+    image: nervos/fiber:0.10.1@sha256:a808a66e9b3d0f8b31fc848e6a96b7e225add71213b266f01e1a5780abdfbbab
     entrypoint: ["/bin/sh", "/fnn-entrypoint.sh"]
     environment:
       # Both optional — the node password is auto-generated, the IP auto-detected.
@@ -65,7 +65,7 @@ services:
 
   # ── a separate payer node for fixed community testnet claims ────────────────
   faucet-fnn:
-    image: nervos/fiber:0.9.0-rc7
+    image: nervos/fiber:0.10.1@sha256:a808a66e9b3d0f8b31fc848e6a96b7e225add71213b266f01e1a5780abdfbbab
     entrypoint: ["/bin/sh", "/fnn-entrypoint.sh"]
     environment:
       FIBER_SECRET_KEY_PASSWORD: ${FAUCET_FIBER_SECRET_KEY_PASSWORD:-}
@@ -110,20 +110,50 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ── initialize cdk-mintd's database-backed configuration once ───────────────
+  mintd-init:
+    image: cashubtc/mintd:0.18.3@sha256:83b80f8f57f2e9bdac57f50e21bbc7faed5c1f5aa4b09ae116d3cf9ce152884b
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if cdk-mintd --work-dir /data config show >/dev/null 2>&1; then
+          echo "[mintd-init] stored configuration already exists"
+          exit 0
+        fi
+        case "$$CDK_MINTD_INIT_MODE" in
+          new-mint|existing-mint) ;;
+          *) echo "CDK_MINTD_INIT_MODE must be new-mint or existing-mint" >&2; exit 1 ;;
+        esac
+        cdk-mintd --work-dir /data config init \
+          "--$$CDK_MINTD_INIT_MODE" \
+          --file /config/config.toml
+    environment:
+      CDK_MINTD_URL: https://${MINT_DOMAIN}
+      CDK_MINTD_MNEMONIC: ${MINT_MNEMONIC}
+      CDK_MINTD_INIT_MODE: ${MINT_CONFIG_INIT_MODE:-new-mint}
+    volumes:
+      - mintd-data:/data
+      - ./mintd.host.toml:/config/config.toml:ro
+    restart: "no"
+
   # ── the stock Cashu mint (unforked, official image) ─────────────────────────
   mintd:
-    image: cashubtc/mintd:0.17.2
+    image: cashubtc/mintd:0.18.3@sha256:83b80f8f57f2e9bdac57f50e21bbc7faed5c1f5aa4b09ae116d3cf9ce152884b
     # This image has CMD ["cdk-mintd"] and NO ENTRYPOINT, so the binary name must be repeated.
-    command: ["cdk-mintd", "--work-dir", "/data", "--config", "/data/config.toml", "--enable-logging"]
+    command: ["cdk-mintd", "--work-dir", "/data", "--enable-logging"]
     environment:
       CDK_MINTD_URL: https://${MINT_DOMAIN}
       CDK_MINTD_MNEMONIC: ${MINT_MNEMONIC}
     volumes:
       - mintd-data:/data
-      - ./mintd.host.toml:/data/config.toml:ro
+      - ./mintd.host.toml:/config/config.toml:ro
     network_mode: "service:fnn"     # reach the processor at 127.0.0.1:50051
     depends_on:
-      - processor
+      processor:
+        condition: service_started
+      mintd-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # ── capability-scoped NUT-18 payment delivery ──────────────────────────────

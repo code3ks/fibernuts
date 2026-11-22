@@ -43,15 +43,18 @@ server with one `docker compose up`.
 
 ## Protocol status
 
-**The full cycle works, with real money moving across real payment channels.** Verified against a
-live 3-node Fiber devnet (`nervos/fiber:0.9.0-rc7`) and a stock `cdk-mintd 0.17.2` installed
-straight from crates.io. The mint registers
+**The full cycle works, with real money moving across real payment channels.** The original live
+evidence used a 3-node Fiber devnet (`nervos/fiber:0.9.0-rc7`) and stock `cdk-mintd 0.17.2`.
+The current adapter and deployment files pin Fiber `v0.10.1` and CDK `v0.18.3`; both the
+deterministic money-safety suite and a three-node local devnet mint/cash-out cycle cover that stable
+pair. Live evidence always names the versions it exercised and is not silently carried forward
+across upgrades. The mint registers
 `PaymentProcessorKey { unit: Custom("rusd"), method: Custom("fiber") }` and advertises NUT-04/NUT-05
 for method `fiber`, unit `rusd`.
 
-A wallet minted **$1.00** by paying the mint's Fiber invoice, sent **$0.30** as a bearer token and
-received it back, then melted **$0.40** to an invoice on a node two hops away. Channel balances,
-read off the nodes:
+In the original release-candidate baseline cycle, a wallet minted **$1.00** by paying the mint's
+Fiber invoice, sent **$0.30** as a bearer token and received it back, then melted **$0.40** to an
+invoice on a node two hops away. Channel balances, read off the nodes:
 
 | | mint's node | payer's node |
 |---|---|---|
@@ -63,9 +66,15 @@ The payment routed through a middle node that charged a real 0.1% fee, so the me
 fee estimate, its reserve, and the change returned to the wallet were all exercised on live
 settlement rather than in a mock. `docs/integration-contract.md` §10 walks the arithmetic.
 
-Three `#[ignore]`d live tests run against that devnet and assert the rules a mint cannot get wrong —
-including one that forges a **hold invoice**, pays it for real, waits for the node to park the TLC in
-`Received`, and proves the backend credits nothing. `make ci` never touches a node.
+The stable compatibility rerun minted 200 ecash units through stock `cdk-mintd 0.18.3`, then paid
+an external 100-unit invoice over Fiber `0.10.1`. The external invoice reached `Paid`, the realized
+fee was 1 unit, and the wallet retained 99 units. `docs/compatibility.md` records the exact pins and
+scope of that evidence.
+
+Three `#[ignore]`d live tests also passed against the stable devnet and assert the rules a mint
+cannot get wrong — including one that forges a **hold invoice**, pays it for real, waits for the
+node to park the TLC in `Received`, and proves the backend credits nothing. `make ci` never touches
+a node.
 
 Two runbooks reproduce it end to end: **`deploy/devnet.md`** stands up a throwaway 3-node network
 with zero external dependencies (the asset is a dev UDT standing in for RUSD), and
@@ -120,8 +129,11 @@ cargo build --release --manifest-path mint/Cargo.toml -p fibernuts-processor
 FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 ./mint/target/release/fibernuts-processor
 
 # 2. a stock, unmodified mint
-cargo install cdk-mintd --version 0.17.2
-cdk-mintd --config deploy/mintd.config.toml     # set a real `mnemonic` first
+cargo install cdk-mintd --version 0.18.3 --locked
+export CDK_MINTD_MNEMONIC="your twelve word mnemonic"
+cdk-mintd --work-dir /tmp/fibernuts-mint config init --new-mint \
+  --file deploy/mintd.config.toml
+cdk-mintd --work-dir /tmp/fibernuts-mint --enable-logging
 
 # 3. the wallet
 npm --prefix wallet ci && npm --prefix wallet run dev    # http://127.0.0.1:5174
@@ -164,7 +176,7 @@ hold invoice whose TLC stalls until manually settled.
 ## What this cost to get right
 
 Both cdk and the Fiber node ship comments that contradict their code. `docs/integration-contract.md`
-records what they actually do, with citations. The three that would have silently broken a mint:
+records what they actually do, with citations. The four that would have silently broken a mint:
 
 - **The gRPC bridge drops `method`.** `cdk-payment-processor` has no proto field for it and
   reconstructs it as `""` — under a comment reading `// Will be set from variant`, which never
@@ -172,13 +184,17 @@ records what they actually do, with citations. The three that would have silentl
 - **Fiber silently clamps your fee ceiling.** `max_fee_amount` is reduced to
   `min(yours, amount × 0.5%)`. Any reserve above 0.5% is quietly cut, and the payment then fails to
   route for a fee the mint already quoted and collected. `cdk-fiber` raises `max_fee_rate` to match.
-- **`cdk-mintd`'s own example config does not work.** `[grpc_processor].addr` needs an `http://`
-  scheme (the example omits it), and the four `min_mint`/`max_mint`/`min_melt`/`max_melt` limits are
-  mandatory — omitting them fails with `data did not match any variant of untagged enum LnOneOrMany`.
+- **CDK 0.18 configuration is database-backed.** `--config` is rejected at startup. Initialize a
+  new mint with `config init --new-mint`, or import an existing mint with
+  `config init --existing-mint`; using the wrong mode is an identity/accounting error.
+- **Plaintext gRPC is now explicit.** `[grpc_processor].address` is a bare host, and either
+  `tls_dir` or `allow_insecure = true` is required. FiberNuts permits plaintext only when mintd
+  and the processor share the same loopback namespace.
 
-Two more worth knowing: the Fiber node **never exposes a payment preimage** through any RPC, so
-`payment_proof` is always `None`; and `send_payment` with `dry_run: true` returns a genuinely routed
-fee without dispatching a TLC, which is exactly what a melt quote needs.
+Two more worth knowing: Fiber `v0.10.1` exposes the preimage learned from a successful payment, so
+`cdk-fiber` returns it as `payment_proof` only for a paid melt and redacts it from debug output;
+and `send_payment` with `dry_run: true` returns a genuinely routed fee without dispatching a TLC,
+which is exactly what a melt quote needs.
 
 ## Development
 
@@ -191,19 +207,20 @@ make ci      # fmt-check + lint + test + build (what CI runs)
 `cdk-fiber` reaches the node only through an injectable `FiberRpc` trait, so the whole
 `MintPayment` implementation is tested against a mock, and `make ci` never touches a node. An
 opt-in suite (`--ignored`) runs the same invariants against a real devnet; `deploy/devnet.md` has
-the command. cdk is pinned to `=0.17.2`: its `MintPayment` trait changes shape across minor
+the command. cdk is pinned to `=0.18.3`: its `MintPayment` trait changes shape across minor
 versions.
 
 The Fiber wire types are hand-rolled rather than taken from the published `fiber-json-types`, which
-drags in the `ckb-*` tree — 412 transitive packages and an MSRV of Rust 1.95 — for four structs.
+pulls the broad `ckb-*` type tree into a small payment adapter. The subset is checked directly
+against the exact pinned Fiber source and covered by encoding tests.
 
 ## Protocol references
 
 - [`docs/spec.md`](docs/spec.md) defines the money flows, units, and protocol boundary.
 - [`docs/integration-contract.md`](docs/integration-contract.md) records the load-bearing CDK and
   Fiber behavior verified by the current adapter.
-- [`docs/compatibility.md`](docs/compatibility.md) separates the tested baseline from pinned stable,
-  hosted-LSP, and browser-wallet targets.
+- [`docs/compatibility.md`](docs/compatibility.md) separates historical live evidence, the stable
+  direct-settlement pins, and the hosted-LSP and browser-wallet targets.
 - [`docs/failure-model.md`](docs/failure-model.md) defines authoritative state, recovery rules, and
   the settlement, signer, browser-key, and refund threat model.
 - [`docs/mainnet-validation.md`](docs/mainnet-validation.md) records the mainnet RUSD identity and

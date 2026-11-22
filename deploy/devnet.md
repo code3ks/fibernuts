@@ -4,8 +4,8 @@ A complete mint → send → receive → melt cycle, with real money moving acro
 No testnet faucet, no counterparty to beg from.
 
 The devnet comes from the companion `fiber-forge` setup, which bakes the Fiber contracts into a CKB
-dev-chain genesis, boots `nervos/fiber:0.9.0-rc7` nodes, funds them, and issues a dev UDT. That UDT
-carries **8 decimals**, exactly like RUSD, so `unit_scale` needs no change from production.
+dev-chain genesis, boots the pinned `nervos/fiber:0.10.1` nodes, funds them, and issues a dev UDT.
+That UDT carries **8 decimals**, exactly like RUSD, so `unit_scale` needs no change from production.
 
 You need Docker running, `protoc`, a Rust toolchain, and Node 20+.
 
@@ -36,13 +36,23 @@ network works identically, but every route is one hop and every routing fee is z
 
 ```sh
 cd ../fiber-forge                       # wherever fiber-forge lives
-node bin/forge.mjs up line:3 --ckb-port 8124 --rpc-base 8310 --no-gui --json
+npm ci && npm run build
+node --input-type=module <<'EOF'
+import { createFiberForge, line } from "./dist/sdk.js";
+
+const forge = createFiberForge();
+const layout = await forge.up(line(3), {
+  fnnImage: "nervos/fiber:0.10.1@sha256:a808a66e9b3d0f8b31fc848e6a96b7e225add71213b266f01e1a5780abdfbbab",
+  layout: { ckbHostPort: 8124, rpcHostPortBase: 8310 },
+});
+console.log(JSON.stringify(layout, null, 2));
+EOF
 ```
 
 Node names are generated. Read them back, along with each node's host RPC port:
 
 ```sh
-node bin/forge.mjs status line3 --json
+node bin/fiber-forge.mjs status line3 --json
 ```
 
 Below, `riemann`/`lorentz`/`confucius` are on `:8310`/`:8311`/`:8312`. Substitute your own.
@@ -53,12 +63,12 @@ Each node that must *send* UDT needs UDT on-chain first. Amounts are in whole UD
 units), so `10000000000` is 1e18 base units — far more than the demo needs.
 
 ```sh
-node bin/forge.mjs udt issue line3 confucius 10000000000
-node bin/forge.mjs udt issue line3 lorentz   10000000000
+node bin/fiber-forge.mjs udt issue line3 confucius 10000000000
+node bin/fiber-forge.mjs udt issue line3 lorentz   10000000000
 
 # each hop is opened by the node further from the mint
-node bin/forge.mjs channel open line3 confucius lorentz 1000 --udt
-node bin/forge.mjs channel open line3 lorentz   riemann 1000 --udt
+node bin/fiber-forge.mjs channel open line3 confucius lorentz 1000 --udt
+node bin/fiber-forge.mjs channel open line3 lorentz   riemann 1000 --udt
 ```
 
 1000 whole UDT = 1e11 base units = **100,000 ecash units = $1,000.00** of headroom per hop.
@@ -107,11 +117,14 @@ for RUSD — same 8 decimals, same code path, same `unit_scale`.
 ## 5. Start a stock mint
 
 ```sh
-cargo install cdk-mintd --version 0.17.2
-cdk-mintd --config deploy/mintd.config.toml --work-dir /tmp/fibernuts-mint
+cargo install cdk-mintd --version 0.18.3 --locked
+export CDK_MINTD_MNEMONIC="your twelve word mnemonic"
+cdk-mintd --work-dir /tmp/fibernuts-mint-v0183 config init --new-mint \
+  --file deploy/mintd.config.toml
+cdk-mintd --work-dir /tmp/fibernuts-mint-v0183 --enable-logging
 ```
 
-Set a real `mnemonic` in the config first. Confirm the backend registered:
+Use a fresh mnemonic for this disposable devnet. Confirm the backend registered:
 
 ```sh
 curl -s localhost:8085/v1/info | jq '.nuts["4"].methods'
@@ -178,7 +191,7 @@ credits nothing. It then cancels the invoice to release the peer's funds.
 ## 8. Tear down
 
 ```sh
-node bin/forge.mjs down line3 --purge
+node bin/fiber-forge.mjs down line3 --purge
 ```
 
 ---
@@ -189,8 +202,8 @@ node bin/forge.mjs down line3 --purge
 |---|---|---|
 | `Currency must be Fibd with the chain network` | invoice currency does not match the chain | `FIBERNUTS_NETWORK=devnet` |
 | mint quote succeeds, payment never routes | the mint's node opened the channel, so the peer has no outbound balance | open each hop from the node *further* from the mint |
-| `Payment backend reports unit … but config registers unit …` | `[ln].unit` differs from `FIBERNUTS_UNIT` | make both exactly `rusd`; custom units compare by exact string |
-| mintd exits: `data did not match any variant of untagged enum LnOneOrMany` | `min_mint`/`max_mint`/`min_melt`/`max_melt` missing | all four are mandatory in `[ln]` |
-| mintd cannot reach the processor | `[grpc_processor].addr` has no scheme | `addr = "http://127.0.0.1"` (the processor *binds* a bare IP; the mint *dials* a URL) |
+| `Payment backend reports unit … but config registers unit …` | the payment backend, gRPC allowlist, and processor disagree on the unit | use canonical `rusd` in `[payment_backend].unit`, `[grpc_processor].supported_units`, and `FIBERNUTS_UNIT` |
+| mintd starts with an old or empty configuration | the file was edited after the database-backed config was initialized | review the change, then use `config apply`; use `config init` only for a new work directory |
+| mintd cannot reach the processor | address or transport policy is wrong | use the bare host `address = "127.0.0.1"` and `allow_insecure = true` only on loopback; use `tls_dir` across hosts |
 | melt quote fails, mint says `Unit unsupported` | cdk maps any backend error to a generic code | read the processor's log — the real reason is only there |
 | melt quote fails with `allow_self_payment` | the melt invoice was issued by the mint's own node | issue it from the peer |

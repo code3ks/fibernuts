@@ -1,8 +1,7 @@
 //! JSON-RPC wire types for the Fiber Network Node (FNN).
 //!
-//! These mirror `fiber-json-types` but are re-declared here so the crate does not pull the
-//! `ckb-*` dependency tree (which raises the MSRV to 1.95 and adds ~400 transitive packages)
-//! for what amounts to a handful of structs.
+//! These mirror `fiber-json-types` but are re-declared here so the crate does not pull the broad
+//! `ckb-*` type, Molecule, and schema dependency tree for what amounts to a handful of structs.
 //!
 //! FNN encodes every integer as a `0x`-prefixed, minimal-form lowercase hex string: zero is
 //! `"0x0"`, never `"0x00"`. Its deserializers reject redundant leading zeros, so the encoders
@@ -97,6 +96,20 @@ pub fn hash_from_hex(raw: &str) -> Result<[u8; 32], Error> {
             .map_err(|_| Error::InvalidHash(raw.to_string()))?;
     }
     Ok(out)
+}
+
+fn deserialize_opt_hash<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    use serde::de::Error as _;
+
+    Option::<String>::deserialize(deserializer)?
+        .map(|raw| {
+            hash_from_hex(&raw)
+                .map(|bytes| hash_to_hex(&bytes))
+                .map_err(D::Error::custom)
+        })
+        .transpose()
 }
 
 /// A CKB script, as FNN's JSON-RPC encodes it. Identifies the UDT (e.g. RUSD).
@@ -348,13 +361,13 @@ pub struct SendPaymentParams {
 
 /// Result of both `send_payment` and `get_payment`.
 ///
-/// There is no preimage field, under any build configuration. FNN keeps the preimage on its
-/// internal `PaymentAttempt` and never surfaces it through the RPC layer, so a mint settling
-/// over Fiber cannot populate cdk's `payment_proof`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PaymentResult {
     /// `0x`-prefixed payment hash.
     pub payment_hash: String,
+    /// Preimage learned from a successful payment attempt. This is bearer-sensitive data.
+    #[serde(default, deserialize_with = "deserialize_opt_hash")]
+    pub payment_preimage: Option<String>,
     /// Current status.
     pub status: PaymentStatus,
     /// Routing fee actually paid, in the UDT's base units. Populated on a `dry_run` too.
@@ -363,6 +376,21 @@ pub struct PaymentResult {
     /// Free-form failure reason when `status` is `Failed`.
     #[serde(default)]
     pub failed_error: Option<String>,
+}
+
+impl std::fmt::Debug for PaymentResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaymentResult")
+            .field("payment_hash", &self.payment_hash)
+            .field(
+                "payment_preimage",
+                &self.payment_preimage.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("status", &self.status)
+            .field("fee", &self.fee)
+            .field("failed_error", &self.failed_error)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -420,6 +448,44 @@ mod tests {
             serde_json::from_str::<Req>(r#"{"a":"0x1"}"#).unwrap().b,
             None
         );
+    }
+
+    #[test]
+    fn payment_result_accepts_responses_without_a_preimage() {
+        let payment: PaymentResult = serde_json::from_str(&format!(
+            r#"{{"payment_hash":"0x{}","status":"Success","fee":"0x0"}}"#,
+            "11".repeat(32)
+        ))
+        .unwrap();
+
+        assert!(payment.payment_preimage.is_none());
+    }
+
+    #[test]
+    fn payment_result_debug_redacts_the_preimage() {
+        // Synthetic fixture: never use or record a real payment preimage in tests.
+        let preimage = format!("0x{}", "22".repeat(32));
+        let payment = PaymentResult {
+            payment_hash: format!("0x{}", "11".repeat(32)),
+            payment_preimage: Some(preimage.clone()),
+            status: PaymentStatus::Success,
+            fee: 0,
+            failed_error: None,
+        };
+
+        let debug = format!("{payment:?}");
+        assert!(!debug.contains(&preimage));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn payment_result_rejects_a_malformed_preimage() {
+        let result = serde_json::from_str::<PaymentResult>(&format!(
+            r#"{{"payment_hash":"0x{}","payment_preimage":"0x01","status":"Success","fee":"0x0"}}"#,
+            "11".repeat(32)
+        ));
+
+        assert!(result.is_err());
     }
 
     #[test]
