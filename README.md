@@ -126,7 +126,11 @@ You need a Fiber node, `protoc`, and a Rust toolchain.
 ```sh
 # 1. the payment backend, wrapping your Fiber node
 cargo build --release --manifest-path mint/Cargo.toml -p fibernuts-processor
-FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 ./mint/target/release/fibernuts-processor
+mkdir -p /tmp/fibernuts-processor
+FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 \
+FIBERNUTS_MINT_URL=http://127.0.0.1:8085 \
+FIBERNUTS_JOURNAL_PATH=/tmp/fibernuts-processor/settlement.sqlite3 \
+./mint/target/release/fibernuts-processor
 
 # 2. a stock, unmodified mint
 cargo install cdk-mintd --version 0.18.3 --locked
@@ -146,11 +150,13 @@ curl -s localhost:8085/v1/info | jq '.nuts["4"].methods'
 # [{"method":"fiber","unit":"rusd","min_amount":1,"max_amount":500000}]
 ```
 
-The processor is configured by environment — `FIBERNUTS_FIBER_RPC`, `FIBERNUTS_LISTEN_ADDR`
-(a bare IP), `FIBERNUTS_LISTEN_PORT`, `FIBERNUTS_UNIT`, `FIBERNUTS_UNIT_SCALE`,
+The processor is configured by environment — `FIBERNUTS_FIBER_RPC`, `FIBERNUTS_MINT_URL`,
+the required persistent `FIBERNUTS_JOURNAL_PATH`, `FIBERNUTS_LISTEN_ADDR` (a bare IP),
+`FIBERNUTS_LISTEN_PORT`, `FIBERNUTS_UNIT`, `FIBERNUTS_UNIT_SCALE`,
 `FIBERNUTS_NETWORK`, `FIBERNUTS_UDT_CODE_HASH` / `FIBERNUTS_UDT_ARGS` (or `native` for CKB),
 `FIBERNUTS_FEE_PERCENT`, `FIBERNUTS_MIN_FEE_RESERVE`, `FIBERNUTS_POLL_SECS`,
-`FIBERNUTS_PAYMENT_TIMEOUT_SECS`. All have working defaults for RUSD on testnet.
+`FIBERNUTS_PAYMENT_TIMEOUT_SECS`, and `FIBERNUTS_JOURNAL_RETENTION_SECS`. Settlement records are
+bound to the mint URL, unit, network, scale, and exact asset; only old terminal records are pruned.
 
 ## Money safety
 
@@ -230,8 +236,8 @@ against the exact pinned Fiber source and covered by encoding tests.
 
 - Fold `deploy/devnet.md` into a single `make demo` target.
 - Upstream `cdk-fiber` to `cashubtc/cdk` alongside `cdk-cln` and `cdk-lnd`.
-- Persist the invoice watch set, so the payment event stream survives a restart (correctness does
-  not depend on it today — `check_incoming_payment_status` is authoritative).
+- Restore journaled invoice watches automatically so the payment event stream wakes immediately
+  after a restart (`check_incoming_payment_status` remains authoritative).
 - Melt events on the payment stream, once a pending melt can be resolved without polling.
 - Multi-unit mints: one processor per unit today.
 

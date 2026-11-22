@@ -18,7 +18,8 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --no-create-home --uid 10001 fibernuts
+    && useradd --system --no-create-home --uid 10001 fibernuts \
+    && install -d -o fibernuts -g fibernuts /var/lib/fibernuts
 COPY --from=build /build/target/release/fibernuts-processor /usr/local/bin/fibernuts-processor
 USER fibernuts
 ENTRYPOINT ["fibernuts-processor"]

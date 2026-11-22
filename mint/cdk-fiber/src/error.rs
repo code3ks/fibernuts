@@ -2,9 +2,15 @@
 
 use thiserror::Error;
 
+use crate::journal::JournalError;
+
 /// Everything that can go wrong between the mint and the Fiber node.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Durable settlement correlation could not be read or updated safely.
+    #[error(transparent)]
+    Journal(#[from] JournalError),
+
     /// The HTTP request to the node never produced a JSON-RPC response.
     #[error("fiber node unreachable: {0}")]
     Transport(String),
@@ -90,5 +96,11 @@ pub enum Error {
 impl From<Error> for cdk_common::payment::Error {
     fn from(e: Error) -> Self {
         Self::Backend(Box::new(e))
+    }
+}
+
+impl From<JournalError> for cdk_common::payment::Error {
+    fn from(e: JournalError) -> Self {
+        Self::from(Error::Journal(e))
     }
 }

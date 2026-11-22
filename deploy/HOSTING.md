@@ -271,8 +271,9 @@ curl -fsS https://claim.fibernuts.xyz/v1/stats | jq
   honor and holders lose their money. Generate a fresh one, back it up **offline and encrypted**,
   never commit it, never change it for the life of the mint.
 - **Back up the `fnn-data` volume** (the CKB key, its auto-generated encryption password, and the
-  channel state) and **`mintd-data`** (which quotes were paid, which proofs were spent). Losing
-  `fnn-data` loses the node's on-chain funds; losing `mintd-data` corrupts the mint's accounting.
+  channel state), **`processor-data`** (durable settlement intent and quote/payment correlation),
+  and **`mintd-data`** (which quotes were paid, which proofs were spent). Losing `fnn-data` loses
+  the node's on-chain funds; losing either database breaks complete settlement recovery.
 - **Back up `faucet-fnn-data` and `faucet-data`.** The first contains the separately funded payer
   key and channel state; the second prevents ambiguous claims from being dispatched twice.
 - Keep `FAUCET_IDENTIFIER_SECRET` stable. It is not a spending key, but changing it breaks lookup

@@ -158,12 +158,16 @@ curl -s http://127.0.0.1:8237 -H 'content-type: application/json' \
 
 ## 5. Point fibernuts at A, then mint and melt
 
-The processor defaults are already correct for testnet RUSD — only the RPC URL changes:
+The settlement defaults are already correct for testnet RUSD. Point the processor at the node,
+identify the mint it serves, and give its journal a persistent path:
 
 ```sh
 cd /path/to/fibernuts
 cargo build --release --manifest-path mint/Cargo.toml -p fibernuts-processor
-FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 ./mint/target/release/fibernuts-processor
+FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 \
+FIBERNUTS_MINT_URL=http://127.0.0.1:8085 \
+FIBERNUTS_JOURNAL_PATH=/tmp/fibernuts-testnet-settlement.sqlite3 \
+./mint/target/release/fibernuts-processor
 # NETWORK=testnet (Fibt), UNIT=rusd, UNIT_SCALE=1000000, and the RUSD script are all defaults.
 ```
 
@@ -219,6 +223,8 @@ FIBERNUTS_UDT_CODE_HASH=0x<your_code_hash> \
 FIBERNUTS_UDT_ARGS=0x<your_owner_lock_hash> \
 FIBERNUTS_UDT_HASH_TYPE=type \
 FIBERNUTS_UNIT_SCALE=<base units per ecash unit for your token's decimals> \
+FIBERNUTS_MINT_URL=http://127.0.0.1:8085 \
+FIBERNUTS_JOURNAL_PATH=/tmp/fibernuts-testnet-custom-settlement.sqlite3 \
 FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 ./mint/target/release/fibernuts-processor
 ```
 

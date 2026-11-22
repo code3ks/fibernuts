@@ -14,15 +14,17 @@ use cdk_common::payment::{
     MintPayment, OutgoingPaymentOptions, PaymentIdentifier,
 };
 use cdk_common::{Amount, CurrencyUnit, QuoteId};
+use tempfile::tempdir;
 use tokio::sync::Mutex;
 
 use cdk_fiber::error::Error;
+use cdk_fiber::journal::{ObservedState, ReconciliationErrorClass, SettlementDirection};
 use cdk_fiber::rpc::FiberRpc;
 use cdk_fiber::wire::{
     CkbInvoice, CkbInvoiceStatus, GetInvoiceResult, InvoiceData, InvoiceResult, NewInvoiceParams,
     ParseInvoiceResult, PaymentResult, PaymentStatus, SendPaymentParams,
 };
-use cdk_fiber::{FiberBackend, FiberConfig};
+use cdk_fiber::{FiberBackend, FiberConfig, SettlementJournal};
 
 const HASH_HEX: &str = "0x5e51a85b7382b235440249867bc49e43fb30afb21bcf4663cb2ebf4f97c60078";
 const INVOICE: &str = "fibt1001pqn7qyqsm6uqzg7dwfhdvmratf9umr7lfhtc";
@@ -192,7 +194,18 @@ fn config() -> FiberConfig {
 
 fn backend(script: Script) -> (FiberBackend, Arc<MockNode>) {
     let node = MockNode::new(script);
-    (FiberBackend::new(node.clone(), config()), node)
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    backend_with_journal(node, journal)
+}
+
+fn backend_with_journal(
+    node: Arc<MockNode>,
+    journal: Arc<SettlementJournal>,
+) -> (FiberBackend, Arc<MockNode>) {
+    (
+        FiberBackend::new(node.clone(), config(), journal).unwrap(),
+        node,
+    )
 }
 
 fn rusd() -> CurrencyUnit {
@@ -201,13 +214,21 @@ fn rusd() -> CurrencyUnit {
 
 /// The gRPC bridge always delivers `method` as an empty string; mirror that here.
 fn incoming(amount: u64, unit: CurrencyUnit) -> IncomingPaymentOptions {
+    incoming_with_quote(amount, unit, QuoteId::new())
+}
+
+fn incoming_with_quote(
+    amount: u64,
+    unit: CurrencyUnit,
+    quote_id: QuoteId,
+) -> IncomingPaymentOptions {
     IncomingPaymentOptions::Custom(Box::new(CustomIncomingPaymentOptions {
         method: String::new(),
         description: Some("fibernuts".to_string()),
         amount: Some(Amount::new(amount, unit)),
         unix_expiry: None,
         extra_json: None,
-        quote_id: QuoteId::new(),
+        quote_id,
         pubkey: None,
     }))
 }
@@ -225,6 +246,10 @@ fn amountless_incoming() -> IncomingPaymentOptions {
 }
 
 fn outgoing(max_fee: Option<u64>) -> OutgoingPaymentOptions {
+    outgoing_with_quote(max_fee, QuoteId::new())
+}
+
+fn outgoing_with_quote(max_fee: Option<u64>, quote_id: QuoteId) -> OutgoingPaymentOptions {
     OutgoingPaymentOptions::Custom(Box::new(CustomOutgoingPaymentOptions {
         method: String::new(),
         request: INVOICE.to_string(),
@@ -233,7 +258,7 @@ fn outgoing(max_fee: Option<u64>) -> OutgoingPaymentOptions {
         timeout_secs: None,
         melt_options: None,
         extra_json: None,
-        quote_id: QuoteId::new(),
+        quote_id,
     }))
 }
 
@@ -274,6 +299,41 @@ async fn an_incoming_request_creates_a_standard_auto_settling_invoice() {
     assert!(
         obj.contains_key("udt_type_script"),
         "RUSD must be denominated"
+    );
+}
+
+#[tokio::test]
+async fn an_incoming_quote_replay_after_restart_returns_the_durable_invoice() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let quote_id = QuoteId::new();
+
+    let first_node = MockNode::new(Script::default());
+    let first_journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (first_backend, _) = backend_with_journal(first_node, first_journal);
+    let first = first_backend
+        .create_incoming_payment_request(incoming_with_quote(
+            AMOUNT_ECASH,
+            rusd(),
+            quote_id.clone(),
+        ))
+        .await
+        .unwrap();
+    drop(first_backend);
+
+    let restarted_node = MockNode::new(Script::default());
+    let restarted_journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (restarted_backend, restarted_node) =
+        backend_with_journal(restarted_node, restarted_journal);
+    let replay = restarted_backend
+        .create_incoming_payment_request(incoming_with_quote(AMOUNT_ECASH, rusd(), quote_id))
+        .await
+        .unwrap();
+
+    assert_eq!(replay, first);
+    assert!(
+        restarted_node.recorded.lock().await.new_invoices.is_empty(),
+        "restart replay must not create a second Fiber invoice"
     );
 }
 
@@ -392,6 +452,43 @@ async fn a_melt_quote_prices_from_the_nodes_dry_run_fee() {
     let recorded = node.recorded.lock().await;
     assert_eq!(recorded.sends.len(), 1);
     assert_eq!(recorded.sends[0].dry_run, Some(true));
+}
+
+#[tokio::test]
+async fn a_paid_outgoing_check_after_restart_recovers_principal_and_fee_from_disk() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let quote_id = QuoteId::new();
+    let fee = 2 * SCALE as u128;
+
+    let first_node = MockNode::new(Script {
+        send_payment: Some(payment(PaymentStatus::Created, fee)),
+        ..Script::default()
+    });
+    let first_journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (first_backend, _) = backend_with_journal(first_node, first_journal);
+    first_backend
+        .get_payment_quote(&rusd(), outgoing_with_quote(None, quote_id))
+        .await
+        .unwrap();
+    drop(first_backend);
+
+    let restarted_node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![Some(payment_with_preimage(
+            PaymentStatus::Success,
+            fee,
+        ))]),
+        ..Script::default()
+    });
+    let restarted_journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (restarted_backend, _) = backend_with_journal(restarted_node, restarted_journal);
+    let result = restarted_backend
+        .check_outgoing_payment(&hash_id())
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, MeltQuoteState::Paid);
+    assert_eq!(result.total_spent.value(), AMOUNT_ECASH + 2);
 }
 
 #[tokio::test]
@@ -518,6 +615,77 @@ async fn a_failed_melt_reports_failed() {
     let result = backend.make_payment(&rusd(), outgoing(None)).await.unwrap();
     assert_eq!(result.status, MeltQuoteState::Failed);
     assert_eq!(result.total_spent.value(), 0);
+}
+
+#[tokio::test]
+async fn dispatch_intent_is_durable_before_a_failed_send_rpc_returns() {
+    let quote_id = QuoteId::new();
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        send_error: true,
+        ..Script::default()
+    });
+    let (backend, _) = backend_with_journal(node, journal.clone());
+
+    assert!(backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .is_err());
+
+    let durable = journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        durable.observed_state(),
+        ObservedState::OutgoingDispatchPrepared
+    );
+    assert_eq!(durable.dispatch_count(), 1);
+    assert_eq!(
+        durable.last_error_class(),
+        Some(ReconciliationErrorClass::NodeRejected)
+    );
+}
+
+#[tokio::test]
+async fn a_lost_dispatch_response_is_not_resent_after_restart() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let quote_id = QuoteId::new();
+
+    let first_node = MockNode::new(Script {
+        send_error: true,
+        ..Script::default()
+    });
+    let first_journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (first_backend, first_node) = backend_with_journal(first_node, first_journal);
+    assert!(first_backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .is_err());
+    assert_eq!(first_node.recorded.lock().await.sends.len(), 1);
+    drop(first_backend);
+
+    let restarted_node = MockNode::new(Script::default());
+    let restarted_journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (restarted_backend, restarted_node) =
+        backend_with_journal(restarted_node, restarted_journal.clone());
+    let result = restarted_backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, MeltQuoteState::Unknown);
+    assert!(
+        restarted_node.recorded.lock().await.sends.is_empty(),
+        "an ambiguous prior dispatch must not be repeated"
+    );
+    let durable = restarted_journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(durable.dispatch_count(), 1);
+    assert_eq!(durable.observed_state(), ObservedState::OutgoingUnknown);
 }
 
 #[tokio::test]

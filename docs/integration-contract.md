@@ -374,10 +374,11 @@ keyset.
 - **A paid result can still lack `payment_proof`.** Fiber `v0.10.1` normally exposes the successful
   preimage, but the field is optional for migrated or older records. Paid state remains
   authoritative; absence of an out-of-band proof does not turn settlement into failure.
-- **The event stream is best-effort.** `cdk-fiber` sweeps open invoices on an interval and emits
-  `Event::PaymentReceived`. The watch set is in memory, so a restart forgets it. Correctness does
-  not depend on the stream: `check_incoming_payment_status` is authoritative, and the mint calls it
-  whenever a wallet checks its quote.
+- **The event stream is best-effort.** `cdk-fiber` durably journals incoming quote/hash correlation,
+  while the current sweeper's active watch set remains in memory. Restoring those journaled watches
+  into the sweeper is separate recovery work. Correctness does not depend on the stream:
+  `check_incoming_payment_status` is authoritative, and the mint calls it whenever a wallet checks
+  its quote.
 - **Melt events are not emitted.** `make_payment` awaits a terminal state and returns it. A melt
   that times out returns `Pending`; the mint resolves it via `check_outgoing_payment`.
 - Amountless invoices are rejected — the backend cannot price them.

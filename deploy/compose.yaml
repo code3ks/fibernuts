@@ -98,12 +98,17 @@ services:
       dockerfile: ../deploy/processor.Dockerfile
     environment:
       FIBERNUTS_FIBER_RPC: http://127.0.0.1:8227
+      FIBERNUTS_MINT_URL: https://${MINT_DOMAIN}
       FIBERNUTS_LISTEN_ADDR: 127.0.0.1
       FIBERNUTS_LISTEN_PORT: "50051"
+      FIBERNUTS_JOURNAL_PATH: /var/lib/fibernuts/settlement.sqlite3
+      FIBERNUTS_JOURNAL_RETENTION_SECS: ${PROCESSOR_JOURNAL_RETENTION_SECS:-7776000}
       FIBERNUTS_NETWORK: testnet
       FIBERNUTS_UNIT: rusd
       FIBERNUTS_UNIT_SCALE: "1000000"
       RUST_LOG: info,cdk_fiber=debug
+    volumes:
+      - processor-data:/var/lib/fibernuts
     network_mode: "service:fnn"     # share fnn's loopback; reach it at 127.0.0.1:8227
     depends_on:
       fnn:
@@ -236,6 +241,7 @@ networks:
 volumes:
   fnn-data:      # config.yml, the encrypted CKB key, channel + graph store — BACK THIS UP
   faucet-fnn-data: # separate funded payer key, channel, and graph store — BACK THIS UP
+  processor-data: # settlement intent and restart-recovery journal — BACK THIS UP
   mintd-data:    # SQLite: which quotes are paid, which proofs are spent
   caddy-data:    # Let's Encrypt certificates
   caddy-config:

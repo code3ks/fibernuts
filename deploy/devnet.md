@@ -101,6 +101,8 @@ cd fibernuts
 cargo build --release --manifest-path mint/Cargo.toml -p fibernuts-processor
 
 FIBERNUTS_FIBER_RPC=http://127.0.0.1:8310 \
+FIBERNUTS_MINT_URL=http://127.0.0.1:8085 \
+FIBERNUTS_JOURNAL_PATH=/tmp/fibernuts-devnet-settlement.sqlite3 \
 FIBERNUTS_NETWORK=devnet \
 FIBERNUTS_UNIT=rusd \
 FIBERNUTS_UNIT_SCALE=1000000 \
