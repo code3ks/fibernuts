@@ -1,15 +1,15 @@
 # Compatibility targets
 
-This document separates the deployed FiberNuts baseline from the versions selected for the next
-reviewed implementation work. A target is not supported until its acceptance checks pass. Exact
-versions and commits are used because the CDK payment trait, Fiber wire behavior, and hosted-LSP
-interfaces can change independently.
+This document separates historical live evidence from the versions supported by the current
+implementation. Exact versions, commits, and release-image digests are used because the CDK payment
+trait, Fiber wire behavior, and hosted-LSP interfaces can change independently.
 
-Last reviewed: 2026-11-14.
+Last reviewed: 2026-11-22.
 
 ## Status vocabulary
 
-- **Tested:** exercised by the current repository tests or a named live environment.
+- **Deterministic-tested:** exercised by the current repository suite without a live node.
+- **Live-tested:** exercised by a named environment with recorded versions and economic effects.
 - **Pinned:** selected for implementation and review, but not yet a supported FiberNuts release.
 - **External:** owned upstream and not controlled by FiberNuts.
 - **Blocked:** must not be presented as working until the stated gate passes.
@@ -19,10 +19,10 @@ Last reviewed: 2026-11-14.
 
 | Surface | Exact target | Status | FiberNuts use |
 |---|---|---|---|
-| Current Fiber baseline | `nervos/fiber:0.9.0-rc7` | Tested | Existing devnet, public-testnet deployment, and hand-written JSON-RPC types |
-| Stable Fiber target | `v0.10.1`, commit `d9b6bbd74faf5b168244e3ddea5b6762a04e0a71` | Pinned | Migrate the direct-node adapter and test environments after contract and recovery tests pass |
-| Current CDK baseline | `cdk-common =0.17.2`, `cdk-payment-processor =0.17.2`, `cashubtc/mintd:0.17.2` | Tested | Existing processor and stock mint integration |
-| Stable CDK target | `v0.18.3`, commit `b2035a3525c98b22226926bdc20fa128a1351ae5` | Pinned | Migrate the adapter, processor, and stock `cdk-mintd` together |
+| Historical Fiber baseline | `nervos/fiber:0.9.0-rc7` | Live-tested | Original devnet and public-testnet evidence only; not accepted with the current CDK processor |
+| Stable Fiber | `v0.10.1`, commit `d9b6bbd74faf5b168244e3ddea5b6762a04e0a71`, image digest `sha256:a808a66e9b3d0f8b31fc848e6a96b7e225add71213b266f01e1a5780abdfbbab` | Live-tested | Current direct-node wire adapter and deployment image; validated on the local three-node devnet below |
+| Historical CDK baseline | `cdk-common =0.17.2`, `cdk-payment-processor =0.17.2`, `cashubtc/mintd:0.17.2` | Live-tested | Original stock-mint evidence only; not accepted with the current processor |
+| Stable CDK | `v0.18.3`, commit `b2035a3525c98b22226926bdc20fa128a1351ae5`, image digest `sha256:83b80f8f57f2e9bdac57f50e21bbc7faed5c1f5aa4b09ae116d3cf9ce152884b` | Live-tested | Current adapter, processor, stock `cdk-mintd`, and canonical database-backed configuration; validated in the cycle below |
 | Browser Fiber client | `@nervosnetwork/fiber-js@0.10.1` | Pinned | Browser-side Fiber APIs used by the hosted onboarding adapter |
 | Hosted LSP | Fiber PR [#1623](https://github.com/nervosnetwork/fiber/pull/1623), `lsp-support` commit `5d564bd0bc86892544b62d594d48d4eeafa4194a` | External, blocked | Project-operated public-testnet LSP and typed tenant adapter; never a silent dependency on the moving branch head |
 | Hosted-LSP design | Fiber issue [#1625](https://github.com/nervosnetwork/fiber/issues/1625) | External | Security and lifecycle requirements; the issue describes a prototype, not production readiness |
@@ -35,20 +35,62 @@ node cannot open a new channel with an older node. An upgrade plan must inventor
 upgrade both intended peers before opening new channels, and preserve a rollback path that does not
 reuse a migrated store with an older binary.
 
-## Direct settlement target
+## Direct settlement support
 
-The stable migration is one coherent change:
+The stable direct-settlement combination is one coherent pin:
 
-1. Update `cdk-common` and `cdk-payment-processor` to exactly `0.18.3` and run the adapter against an
-   unmodified `cdk-mintd 0.18.3`.
-2. Update the Fiber node and test fixtures to exactly `v0.10.1`.
-3. Re-verify every load-bearing statement in `docs/integration-contract.md` against those sources.
-4. Run the full deterministic suite, restart/fault-injection suite, and opt-in live devnet cycle.
-5. Deploy only after mint, melt, delayed settlement, fee accounting, asset validation, event
-   delivery, and restart recovery all pass together.
+1. `cdk-common`, `cdk-payment-processor`, and stock `cdk-mintd` are exactly `0.18.3`.
+2. The Fiber node, hand-written JSON-RPC contract, and deployment image are exactly `v0.10.1`.
+3. The deterministic suite covers mint quote creation, paid-only credit, dry-run fee pricing,
+   cash-out, pending/unknown outcomes, duplicate-dispatch prevention, network and asset rejection,
+   stable-response compatibility, and preimage redaction.
+4. The stock mint configuration is validated with `cdk-mintd 0.18.3`; the Compose model is parsed
+   before release.
 
-Until those checks pass, `0.17.2` plus `0.9.0-rc7` remains the only tested FiberNuts combination.
-Mixing one upgraded side with one baseline side is unsupported.
+### Stable live evidence
+
+On 2026-11-22, a disposable three-node Fiber Forge devnet ran the exact Fiber image above, with all
+nodes reporting `0.10.1` and commit `d9b6bbd`. The exact stock `cdk-mintd 0.18.3` binary used the
+repository processor and a fresh database initialized from the shipped canonical configuration.
+
+- All three opt-in live adapter tests passed: settled-invoice credit, held-TLC non-credit, and
+  unknown outgoing-payment recovery.
+- A wallet paid a Fiber invoice and received exactly 200 `rusd` ecash units from the stock mint.
+- The same wallet cashed out 100 units to an external Fiber invoice. CDK reserved 2 units, Fiber
+  spent a 1-unit fee, the external invoice reached `Paid`, and 99 spendable units remained.
+- The cycle used the devnet `simple_udt` asset with 8 decimals. It is protocol compatibility
+  evidence, not public-testnet RUSD, operator solvency, or production-availability evidence.
+
+Every public deployment migration must record its own versions and results. Historical `0.17.2`
+plus `0.9.0-rc7` evidence is not evidence for the stable pair. Mixing one upgraded side with one
+historical side is unsupported.
+
+## Migration requirements
+
+### CDK 0.17 to 0.18
+
+- Stop the mint and back up the complete mint database and mnemonic before running 0.18.
+- Keep the original mnemonic and database. Never initialize an existing liability set with
+  `--new-mint`.
+- CDK 0.18 rejects `--config` as a startup input. Configuration is imported once into the mint
+  database and later managed with `config apply` / `config rollback`.
+- FiberNuts ships the canonical `[payment_backend]` form. For an existing mint, run
+  `config init --existing-mint --file deploy/mintd.host.toml`; Compose does this when
+  `MINT_CONFIG_INIT_MODE=existing-mint` is set for the first 0.18 start.
+- `[grpc_processor].address` is a bare host in 0.18. Configure mTLS for separate hosts, or set
+  `allow_insecure = true` only for the shared loopback namespace used by the reference Compose
+  deployment.
+
+### Fiber 0.9 release candidates to 0.10.1
+
+- Stop the node, record channels and peers, and back up the complete Fiber data directory before
+  starting the 0.10.1 image.
+- Upgrade intended channel peers before opening new channels. Existing V1 channels continue to
+  operate, but 0.10.1 cannot open a new channel with an older peer.
+- Let 0.10.1 run its store migration once. Never point an older binary at the migrated store; a
+  rollback restores the pre-upgrade backup instead.
+- The 0.10.1 payment RPC adds `payment_preimage` on successful payments. Older stored responses
+  without it remain accepted, but only a `Success` response may produce CDK `payment_proof`.
 
 ## Hosted-LSP target
 

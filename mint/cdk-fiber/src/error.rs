@@ -57,6 +57,10 @@ pub enum Error {
     #[error("fiber invoice carries no amount")]
     AmountlessInvoice,
 
+    /// The mint omitted the amount needed to create a fixed-value Fiber invoice.
+    #[error("incoming Fiber payment request carries no amount")]
+    AmountlessIncomingRequest,
+
     /// A Fiber invoice belongs to a different chain than the configured Fiber node.
     #[error("fiber invoice network `{invoice}` does not match configured network `{configured}`")]
     InvoiceNetworkMismatch {
@@ -85,6 +89,6 @@ pub enum Error {
 
 impl From<Error> for cdk_common::payment::Error {
     fn from(e: Error) -> Self {
-        Self::Lightning(Box::new(e))
+        Self::Backend(Box::new(e))
     }
 }

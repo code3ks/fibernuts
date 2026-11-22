@@ -109,8 +109,10 @@ Rounding always favours the mint's solvency:
 | funds received | **down** | never credit a wallet more than landed |
 | amounts charged (melt, fees) | **up** | never under-charge a payment the mint must make |
 
-The mint's `[ln].unit` and `cdk-fiber`'s reported unit must match **byte for byte** — cdk compares
-custom units by exact string. Lowercase `rusd` everywhere.
+The mint's `[payment_backend].unit`, `[grpc_processor].supported_units`, and `cdk-fiber`'s reported
+unit must resolve to the same CDK currency unit. CDK 0.18 normalizes custom-unit parsing; use the
+canonical lowercase spelling `rusd` at every boundary so configuration and diagnostics stay
+unambiguous.
 
 ## 5. Configuration
 
@@ -131,9 +133,11 @@ custom units by exact string. Lowercase `rusd` everywhere.
 | `FIBERNUTS_POLL_SECS` | `3` | invoice/payment poll interval |
 | `FIBERNUTS_PAYMENT_TIMEOUT_SECS` | `60` | how long a melt waits before reporting `Pending` |
 
-`cdk-mintd` is configured by `deploy/mintd.config.toml`. Two settings break a mint silently and are
-documented there: `[grpc_processor].addr` requires an `http://` scheme, and the four
-`min_mint`/`max_mint`/`min_melt`/`max_melt` limits are mandatory.
+`cdk-mintd` 0.18 stores its active configuration in the mint database. Import
+`deploy/mintd.config.toml` with `config init` for a new work directory, and use `config apply` for a
+reviewed change to an existing mint. `[grpc_processor].address` is a bare host; configure `tls_dir`
+when the processor is remote, or explicitly set `allow_insecure = true` only for a co-located
+loopback processor. `supported_units` must include `rusd`.
 
 ## 6. Testing
 
@@ -149,8 +153,10 @@ The suite encodes the invariants above as named tests — among them
 `an_in_flight_melt_is_never_dispatched_twice`, and
 `the_empty_method_delivered_by_the_grpc_bridge_is_accepted`.
 
-The wire encodings (`0x`-prefixed minimal-form hex, the deliberate absence of `payment_preimage`
-and `payment_hash`) are tested directly, because a mistake there is a silent rejection by the node.
+The wire encodings (`0x`-prefixed minimal-form hex and the deliberate omission of
+`payment_preimage` and `payment_hash` from new-invoice requests) are tested directly, because a
+mistake there is a silent rejection by the node. A successful outgoing payment may return a
+preimage; it is exposed as `payment_proof` only after the node reports `Success`.
 
 A second suite in `mint/cdk-fiber/tests/live_devnet.rs` runs the same invariants against two real
 Fiber nodes. It is `#[ignore]`d, so `make ci` stays node-free; `deploy/devnet.md` gives the command.
@@ -163,5 +169,4 @@ for real, waits for the node to park the TLC in `Received`, and asserts nothing 
 market; an optional bounded testnet quote payer; a local devnet (`deploy/devnet.md`) and testnet.
 
 **Out of scope.** Multi-unit mints (one unit per processor instance); Lightning interop via the
-cross-chain hub; onchain mint/melt; a `payment_proof` (the Fiber node exposes no preimage — see
-`docs/integration-contract.md` §6).
+cross-chain hub; onchain mint/melt.

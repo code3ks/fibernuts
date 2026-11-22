@@ -1,28 +1,29 @@
 # cdk-mintd configuration for a fibernuts RUSD mint.
 #
-# This runs a STOCK, unforked cdk-mintd (v0.17.2). The `grpc-processor` backend it needs is one of
+# This runs a STOCK, unforked cdk-mintd (v0.18.3). The `grpc-processor` backend it needs is one of
 # its default cargo features.
 #
-#   cargo install cdk-mintd --version 0.17.2
-#   cdk-mintd --config deploy/mintd.config.toml
+#   cargo install cdk-mintd --version 0.18.3 --locked
+#   export CDK_MINTD_MNEMONIC="your twelve word mnemonic"
+#   cdk-mintd --work-dir /tmp/fibernuts-mint config init --new-mint \
+#     --file deploy/mintd.config.toml
+#   cdk-mintd --work-dir /tmp/fibernuts-mint
 
 [info]
 url = "http://127.0.0.1:8085"
 listen_host = "127.0.0.1"
 listen_port = 8085
-# Replace before running anything you care about: this seeds the mint's signing keys.
-mnemonic = "put your own twelve word mnemonic here before you run this mint at all"
+# The secret is resolved from the environment during config init and every later start.
+mnemonic = "env:CDK_MINTD_MNEMONIC"
 
-[ln]
-# Exact serde spelling of LnBackend::GrpcProcessor. Not "grpc-processor", not "grpc_processor".
-ln_backend = "grpcprocessor"
+[payment_backend]
+# Exact serde spelling. Not "grpc-processor", not "grpc_processor".
+backend = "grpcprocessor"
 
-# Must byte-match the unit fibernuts-processor reports from get_settings(). cdk compares custom
-# units by exact string, so `RUSD` here would abort startup against a backend reporting `rusd`.
+# Must resolve to the same normalized custom unit that fibernuts-processor reports from
+# get_settings(). Keep the canonical lowercase spelling at every boundary.
 unit = "rusd"
 
-# These four have no serde default and are REQUIRED whenever an [ln] section exists. Omitting any
-# of them fails with the unhelpful `data did not match any variant of untagged enum LnOneOrMany`.
 # Denominated in ecash units: 1 unit = 1 RUSD cent, so this is $0.01 .. $5,000.00.
 min_mint = 1
 max_mint = 500000
@@ -30,11 +31,11 @@ min_melt = 1
 max_melt = 500000
 
 [grpc_processor]
-# The scheme is mandatory. The client does Channel::from_shared("{addr}:{port}"), and tonic
-# rejects a URI without one — cdk's own example.config.toml omits it and does not work.
-# (Note the asymmetry: fibernuts-processor BINDS a bare IP, `FIBERNUTS_LISTEN_ADDR=127.0.0.1`.)
-addr = "http://127.0.0.1"
+# Both sides use a bare IP. cdk-mintd adds the http/https scheme from the TLS setting.
+address = "127.0.0.1"
 port = 50051
+# Plaintext is permitted only because both processes share loopback. Use mTLS for separate hosts.
+allow_insecure = true
 
-# supported_units is not what registers the unit — get_settings() is. Left empty deliberately.
-supported_units = []
+# CDK 0.18 requires a non-empty allowlist; the processor's get_settings response must still match.
+supported_units = ["rusd"]

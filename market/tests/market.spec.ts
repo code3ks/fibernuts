@@ -238,8 +238,8 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
         body.outputs as SerializedBlindedMessage[],
         body.signature!,
       )) {
-        // cdk 0.17.2 verifies the original NUT-20 message. cashu-ts first sends the amended
-        // signature and retries with this legacy signature when the mint returns code 20008.
+        // Exercise cashu-ts's compatibility retry: this synthetic endpoint accepts only the
+        // legacy NUT-20 signature after rejecting the current signature with code 20008.
         return route.fulfill({ status: 400, json: { code: 20008, detail: "Quote signature invalid signature" } });
       }
       shared.mintPayloadSignature = body.signature;

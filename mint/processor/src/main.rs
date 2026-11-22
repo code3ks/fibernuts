@@ -61,13 +61,12 @@ fn udt_script() -> Result<Option<Script>> {
 fn load_config() -> Result<FiberConfig> {
     let unit = env_or("FIBERNUTS_UNIT", "rusd");
     anyhow::ensure!(
-        unit == unit.to_lowercase(),
-        "FIBERNUTS_UNIT must be lowercase: cdk compares custom units by exact string, and the \
-         unit cdk-mintd reads from its own config is lowercased"
+        unit.trim() == unit && unit == unit.to_lowercase(),
+        "FIBERNUTS_UNIT must use its canonical lowercase spelling without surrounding whitespace"
     );
 
     Ok(FiberConfig {
-        unit: CurrencyUnit::Custom(unit),
+        unit: CurrencyUnit::custom(unit),
         currency: currency_from(&env_or("FIBERNUTS_NETWORK", "testnet"))?,
         udt_type_script: udt_script()?,
         unit_scale: env_parse("FIBERNUTS_UNIT_SCALE", 1_000_000u64)?,
@@ -89,9 +88,8 @@ async fn main() -> Result<()> {
         .init();
 
     let rpc_url = env_or("FIBERNUTS_FIBER_RPC", "http://127.0.0.1:8227");
-    // `PaymentProcessorServer` parses this as a bare IP to bind. Note the asymmetry with
-    // cdk-mintd's `[grpc_processor].addr`, which is a tonic URI and *must* carry an `http://`
-    // scheme.
+    // `PaymentProcessorServer` parses this as a bare IP to bind. CDK 0.18 also expects its
+    // `[grpc_processor].address` as a bare host and chooses the scheme from its TLS policy.
     let listen_addr = env_or("FIBERNUTS_LISTEN_ADDR", "127.0.0.1");
     let listen_port: u16 = env_parse("FIBERNUTS_LISTEN_PORT", 50051u16)?;
 

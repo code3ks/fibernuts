@@ -130,8 +130,8 @@ impl FiberBackend {
     }
 
     fn ensure_unit(&self, requested: &CurrencyUnit) -> Result<(), Error> {
-        // Compare rendered names rather than the enum: cdk's `Custom` variants compare by exact
-        // string, so `Custom("RUSD")` and `Custom("rusd")` are unequal despite denoting one unit.
+        // Match CDK 0.18's normalized wire/config representation even when a caller manually
+        // constructs a `Custom` variant instead of using `CurrencyUnit::custom`.
         let configured = self.inner.config.unit.to_string();
         if requested.to_string() == configured {
             return Ok(());
@@ -255,10 +255,15 @@ impl FiberBackend {
             tracing::warn!(reason = %reason, "fiber payment failed");
         }
 
+        let payment_proof = if status == MeltQuoteState::Paid {
+            result.payment_preimage.clone()
+        } else {
+            None
+        };
+
         Ok(MakePaymentResponse {
             payment_lookup_id: PaymentIdentifier::PaymentHash(hash),
-            // FNN never surfaces the preimage through its RPC layer, under any build.
-            payment_proof: None,
+            payment_proof,
             status,
             total_spent,
         })
@@ -367,8 +372,8 @@ impl MintPayment for FiberBackend {
     }
 
     async fn get_settings(&self) -> Result<SettingsResponse, Self::Err> {
-        // `cdk-mintd` registers exactly the methods it finds as keys of `custom`, and aborts if
-        // this unit does not string-match its own `[ln].unit`.
+        // `cdk-mintd` registers exactly the methods it finds as keys of `custom`, and requires
+        // this unit to match its normalized `[payment_backend].unit`.
         let mut custom = std::collections::HashMap::new();
         custom.insert(METHOD.to_string(), "{}".to_string());
 
@@ -390,7 +395,8 @@ impl MintPayment for FiberBackend {
             _ => return Err(Error::UnsupportedMethod { method: METHOD }.into()),
         };
         // `opts.method` is deliberately not inspected: the gRPC bridge always delivers it empty.
-        self.ensure_unit(opts.amount.unit())?;
+        let requested_amount = opts.amount.ok_or(Error::AmountlessIncomingRequest)?;
+        self.ensure_unit(requested_amount.unit())?;
 
         let config = &self.inner.config;
         let now = SystemTime::now()
@@ -405,7 +411,7 @@ impl MintPayment for FiberBackend {
             }
         };
 
-        let amount = amount::to_base(opts.amount.value(), config.unit_scale);
+        let amount = amount::to_base(requested_amount.value(), config.unit_scale);
         let created = self
             .inner
             .rpc

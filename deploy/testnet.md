@@ -76,8 +76,9 @@ sed -i.bak 's|tcp/8228|tcp/8238|' ./config.yml
 sed -i.bak 's|127.0.0.1:8227|127.0.0.1:8237|' ./config.yml
 ```
 
-Run it (Docker image `nervos/fiber:0.9.0-rc7` — no `v` prefix; your node A on `0.9.0-rc2` interops
-fine, testnet nodes span versions):
+Run it with the exact stable image. Node A and node B must both be upgraded to `0.10.1` before
+opening this new channel; `0.10.1` cannot open a new channel with an older V1 peer. Stop each node
+and back up its complete data directory before the first stable start.
 
 ```sh
 # node B's CKB private key (bare hex, no 0x) at ./ckb/key
@@ -85,7 +86,7 @@ docker run --rm -it --name fiber-nodeB \
   -e FIBER_SECRET_KEY_PASSWORD='changeme' -e RUST_LOG=info \
   -v "$HOME/fibernuts-demo/nodeB:/fiber" \
   -p 8238:8238 -p 8237:8237 \
-  nervos/fiber:0.9.0-rc7
+  nervos/fiber:0.10.1@sha256:a808a66e9b3d0f8b31fc848e6a96b7e225add71213b266f01e1a5780abdfbbab
 ```
 
 **[unverified]** end-to-end container run; the config/port facts are from source. If you have the
@@ -167,10 +168,13 @@ FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 ./mint/target/release/fibernuts-proces
 ```
 
 In `deploy/mintd.config.toml`, tighten the limits under the channel size (20 RUSD = 2000 ecash
-units), set a real `mnemonic`, then start `cdk-mintd` as in the top-level README:
+units). Supply the mnemonic through `CDK_MINTD_MNEMONIC`, import the file with `config init` (or
+review and apply it with `config apply` for an existing mint), then start `cdk-mintd` as in the
+top-level README:
 
 ```toml
-[ln]
+[payment_backend]
+backend = "grpcprocessor"
 unit = "rusd"
 min_mint = 1
 max_mint = 1000      # $10.00, comfortably under the 20 RUSD channel
@@ -228,8 +232,8 @@ FIBERNUTS_FIBER_RPC=http://127.0.0.1:8227 ./mint/target/release/fibernuts-proces
 - **Verified from source or a live endpoint:** the RUSD script and its byte-for-byte match to
   `cdk-fiber`'s default; the shipped testnet config whitelists RUSD and targets public CKB;
   `open_channel`/payment shapes (Fiber's own `public-nodes.md`); a UDT channel's acceptor contributes
-  0; the opener must hold on-chain RUSD first; you cannot self-mint RUSD; `nervos/fiber:0.9.0-rc7`
-  exists (rc2 has no image); the processor defaults.
+  0; the opener must hold on-chain RUSD first; you cannot self-mint RUSD; the pinned
+  `nervos/fiber:0.10.1` multi-architecture image exists; the processor defaults.
 - **Probable, not driven end-to-end:** the Stable++ RUSD faucet still dispenses in 2026.
 - **Unverified:** the Stable++ CDP dapp testnet UI; exact CKB faucet amounts; the Docker container run
   end-to-end; the canonical testnet xUDT code cell for §7; exact per-side CKB reserve (budget

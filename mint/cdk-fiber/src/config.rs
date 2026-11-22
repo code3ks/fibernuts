@@ -6,7 +6,7 @@ use cdk_common::CurrencyUnit;
 
 use crate::wire::{Currency, Script};
 
-/// The RUSD UDT type script on CKB testnet, as whitelisted by fnn 0.9.x.
+/// The RUSD UDT type script on CKB testnet, as whitelisted by Fiber v0.10.1.
 pub fn rusd_testnet_script() -> Script {
     Script {
         code_hash: "0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a".into(),
@@ -18,9 +18,8 @@ pub fn rusd_testnet_script() -> Script {
 /// How the backend talks to its Fiber node and prices what it settles.
 #[derive(Debug, Clone)]
 pub struct FiberConfig {
-    /// The unit the mint issues. Must be byte-identical to `[ln].unit` in `cdk-mintd`'s config,
-    /// or mintd aborts at startup: it compares the configured unit against the one this backend
-    /// reports from `get_settings`, and custom units compare by exact string.
+    /// The unit the mint issues. It must resolve to the same normalized CDK currency unit as
+    /// `[payment_backend].unit` and the gRPC processor's `supported_units` allowlist.
     pub unit: CurrencyUnit,
 
     /// The network of the invoices this node issues. FNN rejects a mismatch with its own chain.
@@ -52,7 +51,7 @@ impl FiberConfig {
     /// The defaults fibernuts ships: RUSD on testnet, one ecash unit per RUSD cent.
     pub fn rusd_testnet() -> Self {
         Self {
-            unit: CurrencyUnit::Custom("rusd".to_string()),
+            unit: CurrencyUnit::custom("rusd"),
             currency: Currency::Fibt,
             udt_type_script: Some(rusd_testnet_script()),
             unit_scale: 1_000_000,
