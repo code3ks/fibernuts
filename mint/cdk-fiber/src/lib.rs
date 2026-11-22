@@ -241,6 +241,21 @@ impl FiberBackend {
         Ok(())
     }
 
+    fn validate_payment_result(
+        &self,
+        expected_hash: &str,
+        result: &wire::PaymentResult,
+    ) -> Result<(), Error> {
+        let expected =
+            wire::hash_from_hex(expected_hash).map_err(|_| Error::PaymentHashMismatch)?;
+        let actual =
+            wire::hash_from_hex(&result.payment_hash).map_err(|_| Error::PaymentHashMismatch)?;
+        if actual != expected {
+            return Err(Error::PaymentHashMismatch);
+        }
+        Ok(())
+    }
+
     fn validate_operation_identity(
         &self,
         operation: &SettlementOperation,
@@ -314,18 +329,36 @@ impl FiberBackend {
     ) -> Result<(), Error> {
         let class = match error {
             Error::Transport(_) => ReconciliationErrorClass::RpcUnavailable,
-            Error::Decode(_) | Error::InvalidHash(_) => ReconciliationErrorClass::InvalidResponse,
+            Error::Decode(_) | Error::InvalidHash(_) | Error::PaymentHashMismatch => {
+                ReconciliationErrorClass::InvalidResponse
+            }
             _ => ReconciliationErrorClass::NodeRejected,
         };
-        self.inner.journal.record_reconciliation_error(
-            operation.direction(),
-            operation.quote_id(),
-            operation.revision(),
-            class,
-            now,
-            self.next_reconcile_at(now),
-        )?;
-        Ok(())
+        let mut current = operation.clone();
+        for _ in 0..3 {
+            if current.terminal_at().is_some() {
+                return Ok(());
+            }
+            match self.inner.journal.record_reconciliation_error(
+                current.direction(),
+                current.quote_id(),
+                current.revision(),
+                class,
+                now,
+                self.next_reconcile_at(now),
+            ) {
+                Ok(_) => return Ok(()),
+                Err(JournalError::ConcurrentUpdate) => {
+                    current = self
+                        .inner
+                        .journal
+                        .by_quote_id(current.direction(), current.quote_id())?
+                        .ok_or(JournalError::Conflict)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(JournalError::ConcurrentUpdate.into())
     }
 
     fn incoming_state(status: CkbInvoiceStatus) -> ObservedState {
@@ -367,6 +400,7 @@ impl FiberBackend {
             tokio::time::sleep(self.inner.config.poll_interval).await;
             match self.inner.rpc.get_payment(hash_hex).await {
                 Ok(Some(current)) => {
+                    self.validate_payment_result(hash_hex, &current)?;
                     let terminal = matches!(
                         current.status,
                         PaymentStatus::Success | PaymentStatus::Failed
@@ -393,6 +427,7 @@ impl FiberBackend {
         result: &wire::PaymentResult,
         amount_base: u128,
     ) -> Result<MakePaymentResponse, Error> {
+        self.validate_payment_result(&wire::hash_to_hex(&hash), result)?;
         let scale = self.inner.config.unit_scale;
         let status = match result.status {
             PaymentStatus::Success => MeltQuoteState::Paid,
@@ -709,6 +744,9 @@ impl MintPayment for FiberBackend {
             &invoice.invoice,
             durable.as_ref().map(SettlementOperation::principal_base),
         )?;
+        if invoice.status == CkbInvoiceStatus::Paid && durable.is_none() {
+            return Err(Error::MissingSettlementOperation.into());
+        }
         let now = Self::now_unix();
         self.observe_by_hash(
             SettlementDirection::Incoming,
@@ -724,7 +762,10 @@ impl MintPayment for FiberBackend {
             return Ok(vec![]);
         }
 
-        let amount_base = invoice.invoice.amount.ok_or(Error::AmountlessInvoice)?;
+        let amount_base = durable
+            .as_ref()
+            .ok_or(Error::MissingSettlementOperation)?
+            .principal_base();
         let ecash = amount::from_base_floor(amount_base, self.inner.config.unit_scale)?;
 
         Ok(vec![WaitPaymentResponse {
@@ -782,6 +823,7 @@ impl MintPayment for FiberBackend {
             })
             .await
             .inspect_err(|e| tracing::warn!(error = %e, "melt quote route probe failed"))?;
+        self.validate_payment_result(&hash_hex, &probe)?;
 
         let amount = amount::from_base_ceil(amount_base, config.unit_scale)?;
         let fee = amount::fee_reserve(
@@ -857,6 +899,7 @@ impl MintPayment for FiberBackend {
         // effect for a duplicated CDK call.
         match self.inner.rpc.get_payment(&hash_hex).await {
             Ok(Some(existing)) => {
+                self.validate_payment_result(&hash_hex, &existing)?;
                 let now = Self::now_unix();
                 operation = self.observe(
                     &operation,
@@ -944,6 +987,7 @@ impl MintPayment for FiberBackend {
                 return Err(error.into());
             }
         };
+        self.validate_payment_result(&hash_hex, &dispatched)?;
         let now = Self::now_unix();
         operation = self.observe(
             &operation,
@@ -985,6 +1029,10 @@ impl MintPayment for FiberBackend {
         };
         match node_result {
             Some(result) => {
+                self.validate_payment_result(&hash_hex, &result)?;
+                if result.status == PaymentStatus::Success && durable.is_none() {
+                    return Err(Error::MissingSettlementOperation.into());
+                }
                 let hash = wire::hash_from_hex(&hash_hex)?;
                 if durable.is_some() {
                     self.observe_by_hash(
@@ -998,7 +1046,7 @@ impl MintPayment for FiberBackend {
                 let principal = durable
                     .as_ref()
                     .map(SettlementOperation::principal_base)
-                    .unwrap_or(0);
+                    .unwrap_or_default();
                 Ok(self.payment_response(hash, &result, principal)?)
             }
             // The node never saw this hash: the TLC was never dispatched. `Unknown` lets the mint

@@ -1,5 +1,7 @@
 //! Storage-level tests for restart recovery, atomic identity binding, migrations, and retention.
 
+use std::sync::{Arc, Barrier};
+
 use cdk_fiber::config::rusd_testnet_script;
 use cdk_fiber::journal::{
     EventState, JournalError, JournalScope, NewSettlementOperation, ObservedState,
@@ -227,6 +229,39 @@ fn reconciliation_errors_preserve_the_last_authoritative_state() {
 }
 
 #[test]
+fn an_authoritative_fee_above_the_durable_ceiling_fails_closed() {
+    let journal = SettlementJournal::in_memory().unwrap();
+    journal.bind_scope(&scope()).unwrap();
+    let inserted = journal.insert(outgoing(QUOTE_A, HASH_A, 10)).unwrap();
+
+    let error = journal
+        .record_observation(
+            SettlementDirection::Outgoing,
+            QUOTE_A,
+            ReconciliationObservation {
+                expected_revision: inserted.revision(),
+                state: ObservedState::OutgoingSucceeded,
+                actual_fee_base: Some(2_000_001),
+                checked_at: 20,
+                next_reconcile_at: 30,
+                deadline_unix: None,
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        JournalError::InvalidOperation("actual fee exceeds fee ceiling")
+    ));
+    let unchanged = journal
+        .by_quote_id(SettlementDirection::Outgoing, QUOTE_A)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.observed_state(), ObservedState::OutgoingQuoted);
+    assert!(unchanged.actual_fee_base().is_none());
+}
+
+#[test]
 fn paid_incoming_remains_recoverable_until_event_delivery_is_durable() {
     let journal = SettlementJournal::in_memory().unwrap();
     journal.bind_scope(&scope()).unwrap();
@@ -357,6 +392,60 @@ fn incomplete_recovery_metadata_fails_closed_on_open() {
 }
 
 #[test]
+fn a_database_with_duplicate_operation_identity_fails_closed_on_open() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("duplicate.sqlite3");
+    {
+        let journal = open_bound(&path);
+        journal.insert(incoming(QUOTE_A, HASH_A, 100, 10)).unwrap();
+    }
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE settlement_operations RENAME TO original_operations;
+             CREATE TABLE settlement_operations AS SELECT * FROM original_operations;
+             INSERT INTO settlement_operations SELECT * FROM original_operations;
+             DROP TABLE original_operations;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = SettlementJournal::open(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        JournalError::CorruptRecord {
+            field: "operation identity"
+        }
+    ));
+}
+
+#[test]
+fn a_database_with_multiple_scope_rows_fails_closed_on_open() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("duplicate-scope.sqlite3");
+    {
+        let journal = open_bound(&path);
+        journal.insert(incoming(QUOTE_A, HASH_A, 100, 10)).unwrap();
+    }
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE journal_scope RENAME TO original_scope;
+             CREATE TABLE journal_scope AS SELECT * FROM original_scope;
+             INSERT INTO journal_scope SELECT * FROM original_scope;
+             DROP TABLE original_scope;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = SettlementJournal::open(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        JournalError::CorruptRecord { field: "scope" }
+    ));
+}
+
+#[test]
 fn online_backup_and_non_overwriting_restore_preserve_recovery_state() {
     let directory = tempdir().unwrap();
     let source = directory.path().join("source.sqlite3");
@@ -375,6 +464,45 @@ fn online_backup_and_non_overwriting_restore_preserve_recovery_state() {
 
     let error = SettlementJournal::restore(&backup, &restored).unwrap_err();
     assert!(matches!(error, JournalError::DestinationExists));
+}
+
+#[test]
+fn concurrent_backups_publish_exactly_one_valid_destination() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("source.sqlite3");
+    let backup = directory.path().join("backup.sqlite3");
+    let journal = Arc::new(open_bound(&source));
+    journal.insert(incoming(QUOTE_A, HASH_A, 100, 10)).unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let handles = (0..2)
+        .map(|_| {
+            let journal = journal.clone();
+            let backup = backup.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                journal.backup_to(backup)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(JournalError::DestinationExists)))
+            .count(),
+        1
+    );
+
+    let reopened = SettlementJournal::open(&backup).unwrap();
+    assert_eq!(reopened.recovery_queue().unwrap().len(), 1);
 }
 
 #[test]

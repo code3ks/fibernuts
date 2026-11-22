@@ -140,10 +140,12 @@ The processor journal is correlation and recovery state, not settlement authorit
 outgoing quote and stable attempt identity before dispatch, and records incoming quote/hash binding
 before returning an invoice to CDK. On restart it reconstructs nonterminal work in deterministic
 order, but only a fresh Fiber invoice or payment query can authorize a terminal money state.
-Conflicting quote/hash reuse, corrupt rows, a different configured mint or asset, and newer schema
-versions fail closed. The journal excludes proofs, Cashu tokens, payment preimages, mnemonics, and
-signing keys. SQLite online backups are integrity-checked, restores refuse to overwrite an existing
-database, and retention never removes nonterminal operations.
+Terminal settlement without the matching durable quote, principal, and payment-hash binding fails
+closed; node-reported amounts never replace that durable economic intent. Conflicting quote/hash
+reuse, corrupt rows, a different configured mint or asset, and newer schema versions also fail
+closed. The journal excludes proofs, Cashu tokens, payment preimages, mnemonics, and signing keys.
+SQLite online backups are integrity-checked, restores refuse to overwrite an existing database, and
+retention never removes nonterminal operations.
 
 `cdk-mintd` 0.18 stores its active configuration in the mint database. Import
 `deploy/mintd.config.toml` with `config init` for a new work directory, and use `config apply` for a

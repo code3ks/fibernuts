@@ -39,6 +39,10 @@ that hostname.
   testing restored balances, quotes, and redemption.
 - Before upgrading an existing Fiber node to 0.10.1, stop the stack and back up `fnn-data` and
   `faucet-fnn-data`. Do not run an older Fiber binary against a store migrated by 0.10.1.
+- Before the first journal-backed processor start, pause new add-cash and cash-out quotes and let
+  every existing quote reach a terminal state. The processor cannot reconstruct pre-journal
+  quote/principal bindings from the mint or Fiber database, and intentionally rejects a terminal
+  result that lacks them. Back up the mint, Fiber, and processor volumes together before resuming.
 
 Changing the wallet's compiled default only affects new browser profiles. Returning browsers retain
 their selected mint URL in local storage and must explicitly switch mints; balances stay isolated by
@@ -274,6 +278,10 @@ curl -fsS https://claim.fibernuts.xyz/v1/stats | jq
   channel state), **`processor-data`** (durable settlement intent and quote/payment correlation),
   and **`mintd-data`** (which quotes were paid, which proofs were spent). Losing `fnn-data` loses
   the node's on-chain funds; losing either database breaks complete settlement recovery.
+- Stop the stack with `sudo docker compose down` before copying whole Docker volumes (never add
+  `-v`). Do not copy only the main SQLite file while its WAL is active. The journal library's online
+  backup and restore APIs are intended for controlled operator tooling; the Compose deployment does
+  not expose them as a live admin command. Validate a restore before relying on any backup.
 - **Back up `faucet-fnn-data` and `faucet-data`.** The first contains the separately funded payer
   key and channel state; the second prevents ambiguous claims from being dispatched twice.
 - Keep `FAUCET_IDENTIFIER_SECRET` stable. It is not a spending key, but changing it breaks lookup

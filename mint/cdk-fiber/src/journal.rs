@@ -4,8 +4,11 @@
 //! restart. It is never an authority for settlement: callers must still query the Fiber node
 //! before issuing ecash, releasing proofs, or retrying an outgoing payment.
 
+use std::collections::HashSet;
 use std::fmt;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -17,6 +20,7 @@ use crate::wire::{self, Currency, Script};
 const SCHEMA_VERSION: u32 = 1;
 const RECORD_VERSION: u32 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const RECORD_COLUMNS: &str = "
     record_version, direction, quote_id, payment_hash, invoice, principal_base,
@@ -929,6 +933,15 @@ impl SettlementJournal {
                 return Err(JournalError::Conflict);
             }
         }
+        if observation
+            .actual_fee_base
+            .zip(current.fee_ceiling_base)
+            .is_some_and(|(actual, ceiling)| actual > ceiling)
+        {
+            return Err(JournalError::InvalidOperation(
+                "actual fee exceeds fee ceiling",
+            ));
+        }
         if let (Some(existing), Some(observed)) = (current.deadline_unix, observation.deadline_unix)
         {
             if existing != observed {
@@ -1084,10 +1097,7 @@ impl SettlementJournal {
         if destination.exists() {
             return Err(JournalError::DestinationExists);
         }
-        let temporary = temporary_destination(destination);
-        if temporary.exists() {
-            return Err(JournalError::DestinationExists);
-        }
+        let temporary = reserve_temporary(destination)?;
 
         let result = (|| {
             self.lock()?.backup(MAIN_DB, &temporary, None)?;
@@ -1120,10 +1130,7 @@ impl SettlementJournal {
             Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         validate_database(&source_connection)?;
 
-        let temporary = temporary_destination(destination);
-        if temporary.exists() {
-            return Err(JournalError::DestinationExists);
-        }
+        let temporary = reserve_temporary(destination)?;
         let result = (|| {
             source_connection.backup(MAIN_DB, &temporary, None)?;
             let restored = Connection::open(&temporary)?;
@@ -1265,7 +1272,12 @@ fn validate_database(connection: &Connection) -> Result<(), JournalError> {
 }
 
 fn validate_semantic_content(connection: &Connection) -> Result<(), JournalError> {
+    let scope_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM journal_scope", [], |row| row.get(0))?;
     let bound_scope = read_scope(connection)?;
+    if scope_count > 1 || (scope_count == 1 && bound_scope.is_none()) {
+        return Err(JournalError::CorruptRecord { field: "scope" });
+    }
     let sql = format!("SELECT {RECORD_COLUMNS} FROM settlement_operations");
     let mut statement = connection.prepare(&sql)?;
     let raw_records = statement
@@ -1274,10 +1286,23 @@ fn validate_semantic_content(connection: &Connection) -> Result<(), JournalError
     if !raw_records.is_empty() && bound_scope.is_none() {
         return Err(JournalError::ScopeMismatch);
     }
+    let mut quote_ids = HashSet::with_capacity(raw_records.len());
+    let mut payment_hashes = HashSet::with_capacity(raw_records.len());
     for raw in raw_records {
         let operation = decode_record(raw)?;
         if bound_scope.as_ref() != Some(operation.scope()) {
             return Err(JournalError::ScopeMismatch);
+        }
+        if !quote_ids.insert((
+            operation.direction().as_str(),
+            operation.quote_id().to_string(),
+        )) || !payment_hashes.insert((
+            operation.direction().as_str(),
+            operation.payment_hash().to_string(),
+        )) {
+            return Err(JournalError::CorruptRecord {
+                field: "operation identity",
+            });
         }
     }
     Ok(())
@@ -1396,8 +1421,24 @@ fn validate_record(record: &SettlementOperation, decoded: bool) -> Result<(), Jo
     {
         return Err(invalid("reconciliation metadata"));
     }
+    let event_revision = u64::from(record.event_state == EventState::Delivered);
+    if record.revision
+        != record
+            .reconciliation_count
+            .saturating_add(record.dispatch_count)
+            .saturating_add(event_revision)
+    {
+        return Err(invalid("revision"));
+    }
     if (record.observed_state == ObservedState::OutgoingSucceeded)
         != record.actual_fee_base.is_some()
+    {
+        return Err(invalid("actual_fee_base"));
+    }
+    if record
+        .actual_fee_base
+        .zip(record.fee_ceiling_base)
+        .is_some_and(|(actual, ceiling)| actual > ceiling)
     {
         return Err(invalid("actual_fee_base"));
     }
@@ -1845,9 +1886,9 @@ fn decode_asset(
     }
 }
 
-fn temporary_destination(destination: &Path) -> PathBuf {
+fn temporary_destination(destination: &Path, sequence: u64) -> PathBuf {
     let mut name = destination.as_os_str().to_os_string();
-    name.push(format!(".partial-{}", std::process::id()));
+    name.push(format!(".partial-{}-{sequence}", std::process::id()));
     PathBuf::from(name)
 }
 
@@ -1857,6 +1898,25 @@ fn validate_file_path(path: &Path) -> Result<(), JournalError> {
         return Err(JournalError::InvalidOperation("journal path"));
     }
     Ok(())
+}
+
+fn reserve_temporary(destination: &Path) -> Result<PathBuf, JournalError> {
+    loop {
+        let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = temporary_destination(destination, sequence);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => {
+                drop(file);
+                return Ok(temporary);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(JournalError::Io(error)),
+        }
+    }
 }
 
 fn publish_without_overwrite(temporary: &Path, destination: &Path) -> Result<(), JournalError> {

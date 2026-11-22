@@ -84,6 +84,14 @@ pub enum Error {
     #[error("fiber invoice asset does not match the configured settlement asset")]
     InvoiceAssetMismatch,
 
+    /// A Fiber payment response referred to a different payment than the requested operation.
+    #[error("fiber payment response does not match the requested payment")]
+    PaymentHashMismatch,
+
+    /// A terminal money result could not be tied to its durable quote and principal.
+    #[error("terminal Fiber payment has no durable settlement operation")]
+    MissingSettlementOperation,
+
     /// The mint looked a payment up by something other than its payment hash.
     #[error("cdk-fiber identifies payments by payment hash, got {0}")]
     UnsupportedIdentifier(String),

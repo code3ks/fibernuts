@@ -27,6 +27,7 @@ use cdk_fiber::wire::{
 use cdk_fiber::{FiberBackend, FiberConfig, SettlementJournal};
 
 const HASH_HEX: &str = "0x5e51a85b7382b235440249867bc49e43fb30afb21bcf4663cb2ebf4f97c60078";
+const OTHER_HASH_HEX: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const INVOICE: &str = "fibt1001pqn7qyqsm6uqzg7dwfhdvmratf9umr7lfhtc";
 const SCALE: u64 = 1_000_000;
 const PACKED_RUSD_SCRIPT: &str = concat!(
@@ -64,8 +65,12 @@ fn invoice_with(
 }
 
 fn payment(status: PaymentStatus, fee: u128) -> PaymentResult {
+    payment_for_hash(HASH_HEX, status, fee)
+}
+
+fn payment_for_hash(hash: &str, status: PaymentStatus, fee: u128) -> PaymentResult {
     PaymentResult {
-        payment_hash: HASH_HEX.to_string(),
+        payment_hash: hash.to_string(),
         payment_preimage: None,
         status,
         fee,
@@ -89,6 +94,7 @@ struct Script {
     get_payment: VecDeque<Option<PaymentResult>>,
     send_payment: Option<PaymentResult>,
     send_error: bool,
+    get_error: bool,
 }
 
 #[derive(Default)]
@@ -168,6 +174,9 @@ impl FiberRpc for MockNode {
 
     async fn get_payment(&self, _payment_hash: &str) -> Result<Option<PaymentResult>, Error> {
         let mut script = self.script.lock().await;
+        if script.get_error {
+            return Err(Error::Transport("synthetic RPC outage".to_string()));
+        }
         match script.get_payment.len() {
             0 => Ok(None),
             1 => Ok(script.get_payment[0].clone()),
@@ -380,10 +389,12 @@ async fn an_amountless_incoming_request_is_rejected() {
 
 #[tokio::test]
 async fn a_settled_invoice_credits_the_wallet() {
-    let (backend, _) = backend(Script {
-        invoice_status: Some(CkbInvoiceStatus::Paid),
-        ..Script::default()
-    });
+    let (backend, node) = backend(Script::default());
+    backend
+        .create_incoming_payment_request(incoming(AMOUNT_ECASH, rusd()))
+        .await
+        .unwrap();
+    node.script.lock().await.invoice_status = Some(CkbInvoiceStatus::Paid);
 
     let paid = backend
         .check_incoming_payment_status(&hash_id())
@@ -391,6 +402,19 @@ async fn a_settled_invoice_credits_the_wallet() {
         .unwrap();
     assert_eq!(paid.len(), 1);
     assert_eq!(paid[0].payment_amount.value(), AMOUNT_ECASH);
+}
+
+#[tokio::test]
+async fn a_paid_invoice_without_durable_quote_state_fails_closed() {
+    let (backend, _) = backend(Script {
+        invoice_status: Some(CkbInvoiceStatus::Paid),
+        ..Script::default()
+    });
+
+    assert!(backend
+        .check_incoming_payment_status(&hash_id())
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -455,6 +479,26 @@ async fn a_melt_quote_prices_from_the_nodes_dry_run_fee() {
 }
 
 #[tokio::test]
+async fn a_mismatched_route_probe_is_rejected_before_quote_persistence() {
+    let quote_id = QuoteId::new();
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        send_payment: Some(payment_for_hash(OTHER_HASH_HEX, PaymentStatus::Created, 0)),
+        ..Script::default()
+    });
+    let (backend, _) = backend_with_journal(node, journal.clone());
+
+    assert!(backend
+        .get_payment_quote(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .is_err());
+    assert!(journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn a_paid_outgoing_check_after_restart_recovers_principal_and_fee_from_disk() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("settlement.sqlite3");
@@ -489,6 +533,95 @@ async fn a_paid_outgoing_check_after_restart_recovers_principal_and_fee_from_dis
 
     assert_eq!(result.status, MeltQuoteState::Paid);
     assert_eq!(result.total_spent.value(), AMOUNT_ECASH + 2);
+}
+
+#[tokio::test]
+async fn a_paid_outgoing_check_without_durable_principal_fails_closed() {
+    let (backend, _) = backend(Script {
+        get_payment: VecDeque::from(vec![Some(payment_with_preimage(PaymentStatus::Success, 0))]),
+        ..Script::default()
+    });
+
+    assert!(backend.check_outgoing_payment(&hash_id()).await.is_err());
+}
+
+#[tokio::test]
+async fn a_mismatched_existing_payment_cannot_mutate_the_durable_operation() {
+    let quote_id = QuoteId::new();
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![Some(payment_for_hash(
+            OTHER_HASH_HEX,
+            PaymentStatus::Success,
+            0,
+        ))]),
+        ..Script::default()
+    });
+    let (backend, _) = backend_with_journal(node, journal.clone());
+
+    assert!(backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .is_err());
+
+    let durable = journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(durable.observed_state(), ObservedState::OutgoingQuoted);
+    assert_eq!(durable.dispatch_count(), 0);
+    assert!(durable.actual_fee_base().is_none());
+}
+
+#[tokio::test]
+async fn a_mismatched_dispatch_response_remains_ambiguous_and_nonterminal() {
+    let quote_id = QuoteId::new();
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        send_payment: Some(payment_for_hash(OTHER_HASH_HEX, PaymentStatus::Success, 0)),
+        ..Script::default()
+    });
+    let (backend, _) = backend_with_journal(node, journal.clone());
+
+    assert!(backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .is_err());
+
+    let durable = journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        durable.observed_state(),
+        ObservedState::OutgoingDispatchPrepared
+    );
+    assert_eq!(durable.dispatch_count(), 1);
+    assert!(durable.terminal_at().is_none());
+}
+
+#[tokio::test]
+async fn a_terminal_operation_does_not_mask_a_later_rpc_failure() {
+    let quote_id = QuoteId::new();
+    let node = MockNode::new(Script {
+        send_payment: Some(payment(PaymentStatus::Success, 0)),
+        ..Script::default()
+    });
+    let (backend, node) =
+        backend_with_journal(node, Arc::new(SettlementJournal::in_memory().unwrap()));
+    backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id))
+        .await
+        .unwrap();
+    node.script.lock().await.get_error = true;
+
+    let error = backend
+        .check_outgoing_payment(&hash_id())
+        .await
+        .unwrap_err();
+    let rendered = error.to_string();
+    assert!(rendered.contains("fiber node unreachable"));
+    assert!(!rendered.contains("invalid settlement journal state transition"));
 }
 
 #[tokio::test]
