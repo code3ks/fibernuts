@@ -47,6 +47,11 @@ pub struct FiberConfig {
     /// How often to poll the node for invoice settlement and payment progress.
     pub poll_interval: Duration,
 
+    /// How long background invoice reconciliation continues after the invoice deadline. A record
+    /// remains durable after this grace period and can still be reconciled by an explicit status
+    /// check.
+    pub incoming_watch_grace: Duration,
+
     /// How long `make_payment` waits for a terminal payment status before reporting `Pending`.
     pub payment_timeout: Duration,
 }
@@ -64,6 +69,7 @@ impl FiberConfig {
             fee_percent: 1,
             min_fee_reserve: 1,
             poll_interval: Duration::from_secs(3),
+            incoming_watch_grace: Duration::from_secs(86_400),
             payment_timeout: Duration::from_secs(60),
         }
     }

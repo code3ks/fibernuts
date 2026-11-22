@@ -75,6 +75,10 @@ fn load_config() -> Result<FiberConfig> {
         fee_percent: env_parse("FIBERNUTS_FEE_PERCENT", 1u8)?,
         min_fee_reserve: env_parse("FIBERNUTS_MIN_FEE_RESERVE", 1u64)?,
         poll_interval: Duration::from_secs(env_parse("FIBERNUTS_POLL_SECS", 3u64)?),
+        incoming_watch_grace: Duration::from_secs(env_parse(
+            "FIBERNUTS_INCOMING_WATCH_GRACE_SECS",
+            86_400u64,
+        )?),
         payment_timeout: Duration::from_secs(env_parse("FIBERNUTS_PAYMENT_TIMEOUT_SECS", 60u64)?),
     })
 }

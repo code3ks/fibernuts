@@ -18,7 +18,9 @@ use tempfile::tempdir;
 use tokio::sync::Mutex;
 
 use cdk_fiber::error::Error;
-use cdk_fiber::journal::{ObservedState, ReconciliationErrorClass, SettlementDirection};
+use cdk_fiber::journal::{
+    EventState, ObservedState, ReconciliationErrorClass, SettlementDirection,
+};
 use cdk_fiber::rpc::FiberRpc;
 use cdk_fiber::wire::{
     CkbInvoice, CkbInvoiceStatus, GetInvoiceResult, InvoiceData, InvoiceResult, NewInvoiceParams,
@@ -89,6 +91,8 @@ fn payment_with_preimage(status: PaymentStatus, fee: u128) -> PaymentResult {
 #[derive(Default)]
 struct Script {
     invoice_status: Option<CkbInvoiceStatus>,
+    invoice_result: Option<GetInvoiceResult>,
+    invoice_error: bool,
     parsed_invoice: Option<CkbInvoice>,
     /// Popped per call; the last entry repeats once exhausted.
     get_payment: VecDeque<Option<PaymentResult>>,
@@ -100,6 +104,7 @@ struct Script {
 #[derive(Default)]
 struct Recorded {
     new_invoices: Vec<NewInvoiceParams>,
+    invoice_lookups: Vec<String>,
     sends: Vec<SendPaymentParams>,
 }
 
@@ -133,13 +138,20 @@ impl FiberRpc for MockNode {
         })
     }
 
-    async fn get_invoice(&self, _payment_hash: &str) -> Result<GetInvoiceResult, Error> {
-        let status = self
-            .script
+    async fn get_invoice(&self, payment_hash: &str) -> Result<GetInvoiceResult, Error> {
+        self.recorded
             .lock()
             .await
-            .invoice_status
-            .unwrap_or(CkbInvoiceStatus::Open);
+            .invoice_lookups
+            .push(payment_hash.to_string());
+        let script = self.script.lock().await;
+        if script.invoice_error {
+            return Err(Error::Transport("synthetic invoice RPC outage".to_string()));
+        }
+        if let Some(result) = script.invoice_result.clone() {
+            return Ok(result);
+        }
+        let status = script.invoice_status.unwrap_or(CkbInvoiceStatus::Open);
         Ok(GetInvoiceResult {
             invoice: invoice(Some(AMOUNT_BASE)),
             status,
@@ -211,8 +223,16 @@ fn backend_with_journal(
     node: Arc<MockNode>,
     journal: Arc<SettlementJournal>,
 ) -> (FiberBackend, Arc<MockNode>) {
+    backend_with_config(node, journal, config())
+}
+
+fn backend_with_config(
+    node: Arc<MockNode>,
+    journal: Arc<SettlementJournal>,
+    config: FiberConfig,
+) -> (FiberBackend, Arc<MockNode>) {
     (
-        FiberBackend::new(node.clone(), config(), journal).unwrap(),
+        FiberBackend::new(node.clone(), config, journal).unwrap(),
         node,
     )
 }
@@ -231,11 +251,20 @@ fn incoming_with_quote(
     unit: CurrencyUnit,
     quote_id: QuoteId,
 ) -> IncomingPaymentOptions {
+    incoming_with_quote_and_expiry(amount, unit, quote_id, None)
+}
+
+fn incoming_with_quote_and_expiry(
+    amount: u64,
+    unit: CurrencyUnit,
+    quote_id: QuoteId,
+    unix_expiry: Option<u64>,
+) -> IncomingPaymentOptions {
     IncomingPaymentOptions::Custom(Box::new(CustomIncomingPaymentOptions {
         method: String::new(),
         description: Some("fibernuts".to_string()),
         amount: Some(Amount::new(amount, unit)),
-        unix_expiry: None,
+        unix_expiry,
         extra_json: None,
         quote_id,
         pubkey: None,
@@ -273,6 +302,24 @@ fn outgoing_with_quote(max_fee: Option<u64>, quote_id: QuoteId) -> OutgoingPayme
 
 fn hash_id() -> PaymentIdentifier {
     PaymentIdentifier::PaymentHash(cdk_fiber::wire::hash_from_hex(HASH_HEX).unwrap())
+}
+
+async fn wait_for_incoming_state(
+    journal: &SettlementJournal,
+    observed_state: ObservedState,
+    event_state: EventState,
+) {
+    for _ in 0..100 {
+        let operation = journal
+            .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+            .unwrap()
+            .unwrap();
+        if operation.observed_state() == observed_state && operation.event_state() == event_state {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("incoming operation did not reach {observed_state:?}/{event_state:?}");
 }
 
 #[tokio::test]
@@ -952,7 +999,7 @@ async fn a_melt_in_a_foreign_unit_is_rejected() {
 }
 
 #[tokio::test]
-async fn the_event_stream_is_handed_out_exactly_once() {
+async fn a_concurrent_event_stream_subscription_is_rejected() {
     let (backend, _) = backend(Script::default());
 
     assert!(!backend.is_payment_event_stream_active());
@@ -972,16 +1019,17 @@ async fn dropping_the_stream_clears_the_active_flag() {
 
     drop(stream);
     assert!(!backend.is_payment_event_stream_active());
+
+    let replacement = backend.wait_payment_event().await.unwrap();
+    assert!(backend.is_payment_event_stream_active());
+    drop(replacement);
 }
 
 #[tokio::test]
 async fn a_settled_invoice_is_announced_on_the_event_stream() {
     use futures::StreamExt;
 
-    let (backend, _) = backend(Script {
-        invoice_status: Some(CkbInvoiceStatus::Paid),
-        ..Script::default()
-    });
+    let (backend, node) = backend(Script::default());
 
     let mut stream = backend.wait_payment_event().await.unwrap();
     backend
@@ -989,6 +1037,13 @@ async fn a_settled_invoice_is_announced_on_the_event_stream() {
         .await
         .unwrap();
     backend.start().await.unwrap();
+    node.script.lock().await.invoice_status = Some(CkbInvoiceStatus::Received);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), stream.next())
+            .await
+            .is_err()
+    );
+    node.script.lock().await.invoice_status = Some(CkbInvoiceStatus::Paid);
 
     let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
         .await
@@ -1003,5 +1058,315 @@ async fn a_settled_invoice_is_announced_on_the_event_stream() {
         other => panic!("expected PaymentReceived, got {other:?}"),
     }
 
+    // The pinned stream API cannot acknowledge CDK's database commit. A pull check must remain a
+    // usable, idempotent recovery path after the push notification has been durably claimed.
+    let recovered = backend
+        .check_incoming_payment_status(&hash_id())
+        .await
+        .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].payment_amount.value(), AMOUNT_ECASH);
+
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_buffered_notification_survives_stream_reconnection() {
+    use futures::StreamExt;
+
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        invoice_status: Some(CkbInvoiceStatus::Paid),
+        ..Script::default()
+    });
+    let (backend, _) = backend_with_journal(node, journal.clone());
+    backend
+        .create_incoming_payment_request(incoming(AMOUNT_ECASH, rusd()))
+        .await
+        .unwrap();
+
+    let first_stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+    wait_for_incoming_state(&journal, ObservedState::IncomingPaid, EventState::Pending).await;
+    drop(first_stream);
+
+    let mut replacement = backend.wait_payment_event().await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), replacement.next())
+        .await
+        .expect("the replacement stream must receive the buffered payment")
+        .expect("stream must yield");
+    assert!(matches!(
+        event,
+        cdk_common::payment::Event::PaymentReceived(_)
+    ));
+
+    let operation = journal
+        .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.event_state(), EventState::Delivered);
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_invoice_paid_while_the_processor_is_down_is_restored_on_start() {
+    use futures::StreamExt;
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let quote_id = QuoteId::new();
+    let node = MockNode::new(Script::default());
+    {
+        let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+        let (backend, _) = backend_with_journal(node.clone(), journal);
+        backend
+            .create_incoming_payment_request(incoming_with_quote(AMOUNT_ECASH, rusd(), quote_id))
+            .await
+            .unwrap();
+    }
+
+    node.script.lock().await.invoice_status = Some(CkbInvoiceStatus::Paid);
+    let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (backend, _) = backend_with_journal(node, journal.clone());
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the restored watch must detect payment")
+        .expect("stream must yield");
+    assert!(matches!(
+        event,
+        cdk_common::payment::Event::PaymentReceived(_)
+    ));
+
+    let operation = journal
+        .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.observed_state(), ObservedState::IncomingPaid);
+    assert_eq!(operation.event_state(), EventState::Delivered);
+    assert!(operation.terminal_at().is_some());
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_paid_notification_queued_before_restart_is_handed_off_once() {
+    use futures::StreamExt;
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let quote_id = QuoteId::new();
+    let node = MockNode::new(Script {
+        invoice_status: Some(CkbInvoiceStatus::Paid),
+        ..Script::default()
+    });
+    {
+        let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+        let (backend, _) = backend_with_journal(node.clone(), journal.clone());
+        backend
+            .create_incoming_payment_request(incoming_with_quote(
+                AMOUNT_ECASH,
+                rusd(),
+                quote_id.clone(),
+            ))
+            .await
+            .unwrap();
+        backend.start().await.unwrap();
+        wait_for_incoming_state(&journal, ObservedState::IncomingPaid, EventState::Pending).await;
+        backend.stop().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (backend, _) = backend_with_journal(node, journal.clone());
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+    backend
+        .create_incoming_payment_request(incoming_with_quote(AMOUNT_ECASH, rusd(), quote_id))
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the pending durable notification must be restored")
+        .expect("stream must yield");
+    assert!(matches!(
+        event,
+        cdk_common::payment::Event::PaymentReceived(_)
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), stream.next())
+            .await
+            .is_err()
+    );
+
+    let operation = journal
+        .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.event_state(), EventState::Delivered);
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn repeated_paid_status_checks_do_not_requeue_a_credit_event() {
+    use futures::StreamExt;
+
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        invoice_status: Some(CkbInvoiceStatus::Paid),
+        ..Script::default()
+    });
+    let (backend, _) = backend_with_journal(node, journal.clone());
+    backend
+        .create_incoming_payment_request(incoming(AMOUNT_ECASH, rusd()))
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let responses = backend
+            .check_incoming_payment_status(&hash_id())
+            .await
+            .unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].payment_amount.value(), AMOUNT_ECASH);
+    }
+
+    let operation = journal
+        .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.event_state(), EventState::Delivered);
+
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), stream.next())
+            .await
+            .is_err()
+    );
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_expired_watch_becomes_terminal_and_is_not_restored() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let node = MockNode::new(Script {
+        invoice_status: Some(CkbInvoiceStatus::Expired),
+        ..Script::default()
+    });
+    {
+        let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+        let (backend, _) = backend_with_journal(node.clone(), journal.clone());
+        backend
+            .create_incoming_payment_request(incoming(AMOUNT_ECASH, rusd()))
+            .await
+            .unwrap();
+        backend.start().await.unwrap();
+        wait_for_incoming_state(
+            &journal,
+            ObservedState::IncomingExpired,
+            EventState::Pending,
+        )
+        .await;
+        backend.stop().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(node.recorded.lock().await.invoice_lookups.len(), 1);
+
+    let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (backend, _) = backend_with_journal(node.clone(), journal);
+    backend.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(node.recorded.lock().await.invoice_lookups.len(), 1);
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_old_malformed_watch_is_checked_once_then_left_for_manual_recovery() {
+    let mut malformed = invoice(Some(AMOUNT_BASE + SCALE as u128));
+    malformed.data.payment_hash = HASH_HEX.to_string();
+    let node = MockNode::new(Script {
+        invoice_result: Some(GetInvoiceResult {
+            invoice: malformed,
+            status: CkbInvoiceStatus::Paid,
+        }),
+        ..Script::default()
+    });
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let mut bounded = config();
+    bounded.incoming_watch_grace = Duration::ZERO;
+    let (backend, _) = backend_with_config(node.clone(), journal.clone(), bounded);
+    backend
+        .create_incoming_payment_request(incoming_with_quote_and_expiry(
+            AMOUNT_ECASH,
+            rusd(),
+            QuoteId::new(),
+            Some(0),
+        ))
+        .await
+        .unwrap();
+    backend.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    assert_eq!(node.recorded.lock().await.invoice_lookups.len(), 1);
+    let operation = journal
+        .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.observed_state(), ObservedState::IncomingOpen);
+    assert_eq!(operation.event_state(), EventState::Pending);
+    assert_eq!(
+        operation.last_error_class(),
+        Some(ReconciliationErrorClass::InvalidResponse)
+    );
+    assert!(backend
+        .check_incoming_payment_status(&hash_id())
+        .await
+        .is_err());
+    assert_eq!(node.recorded.lock().await.invoice_lookups.len(), 2);
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_old_unavailable_watch_is_checked_once_then_left_for_manual_recovery() {
+    let node = MockNode::new(Script {
+        invoice_error: true,
+        ..Script::default()
+    });
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let mut bounded = config();
+    bounded.incoming_watch_grace = Duration::ZERO;
+    let (backend, _) = backend_with_config(node.clone(), journal.clone(), bounded);
+    backend
+        .create_incoming_payment_request(incoming_with_quote_and_expiry(
+            AMOUNT_ECASH,
+            rusd(),
+            QuoteId::new(),
+            Some(0),
+        ))
+        .await
+        .unwrap();
+    backend.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    assert_eq!(node.recorded.lock().await.invoice_lookups.len(), 1);
+    let operation = journal
+        .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.observed_state(), ObservedState::IncomingOpen);
+    assert_eq!(operation.event_state(), EventState::Pending);
+    assert_eq!(
+        operation.last_error_class(),
+        Some(ReconciliationErrorClass::RpcUnavailable)
+    );
+    assert!(backend
+        .check_incoming_payment_status(&hash_id())
+        .await
+        .is_err());
+    assert_eq!(node.recorded.lock().await.invoice_lookups.len(), 2);
     backend.stop().await.unwrap();
 }
