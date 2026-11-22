@@ -374,11 +374,18 @@ keyset.
 - **A paid result can still lack `payment_proof`.** Fiber `v0.10.1` normally exposes the successful
   preimage, but the field is optional for migrated or older records. Paid state remains
   authoritative; absence of an out-of-band proof does not turn settlement into failure.
-- **The event stream is best-effort.** `cdk-fiber` durably journals incoming quote/hash correlation,
-  while the current sweeper's active watch set remains in memory. Restoring those journaled watches
-  into the sweeper is separate recovery work. Correctness does not depend on the stream:
-  `check_incoming_payment_status` is authoritative, and the mint calls it whenever a wallet checks
-  its quote.
+- **Incoming stream wakeups are durable but not end-to-end acknowledged.** `cdk-fiber` restores
+  nonterminal incoming watches from its journal and durably claims each push notification before
+  yielding it, so it hands a payment hash to the stream at most once. CDK 0.18's `MintPayment`
+  stream has no acknowledgement after `handle_payment_notification` commits the mint database. A
+  disconnect after the adapter's durable claim can therefore lose that push wakeup. Correctness
+  does not depend on it: `check_incoming_payment_status` remains authoritative, and CDK deduplicates
+  repeated push or pull observations by payment ID.
+- **Background invoice polling is bounded.** The processor performs one reconciliation for every
+  restored nonterminal incoming record. It then polls through the invoice deadline plus
+  `FIBERNUTS_INCOMING_WATCH_GRACE_SECS`. An old open, received, unavailable, or malformed record is
+  removed from the process-local watch set after a final check but remains durable and recoverable
+  through an explicit status check. It is not converted into failure or removed by retention.
 - **Melt events are not emitted.** `make_payment` awaits a terminal state and returns it. A melt
   that times out returns `Pending`; the mint resolves it via `check_outgoing_payment`.
 - Amountless invoices are rejected — the backend cannot price them.

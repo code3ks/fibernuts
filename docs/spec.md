@@ -134,6 +134,7 @@ unambiguous.
 | `FIBERNUTS_FEE_PERCENT` | `1` | cushion added to the node's routed fee |
 | `FIBERNUTS_MIN_FEE_RESERVE` | `1` | floor on the melt fee, in ecash units |
 | `FIBERNUTS_POLL_SECS` | `3` | invoice/payment poll interval |
+| `FIBERNUTS_INCOMING_WATCH_GRACE_SECS` | `86400` | background reconciliation after invoice expiry; durable pull recovery remains available afterward |
 | `FIBERNUTS_PAYMENT_TIMEOUT_SECS` | `60` | how long a melt waits before reporting `Pending` |
 
 The processor journal is correlation and recovery state, not settlement authority. It commits an
@@ -146,6 +147,15 @@ reuse, corrupt rows, a different configured mint or asset, and newer schema vers
 closed. The journal excludes proofs, Cashu tokens, payment preimages, mnemonics, and signing keys.
 SQLite online backups are integrity-checked, restores refuse to overwrite an existing database, and
 retention never removes nonterminal operations.
+
+On startup the processor restores every nonterminal incoming record and performs authoritative
+Fiber reconciliation. A `PaymentReceived` stream notification is durably claimed before it is
+handed to the processor stream; repeated stream wakeups for the same payment hash are suppressed.
+The pinned CDK interface has no acknowledgement after its mint-database commit, so an interrupted
+push handoff is recovered through `check_incoming_payment_status`, whose repeated paid responses
+are idempotent in CDK by payment ID. Background polling stops after the invoice deadline plus the
+configured grace period, following one final reconciliation. The unresolved journal record remains
+durable for explicit status checks and is never relabeled failed merely because polling stopped.
 
 `cdk-mintd` 0.18 stores its active configuration in the mint database. Import
 `deploy/mintd.config.toml` with `config init` for a new work directory, and use `config apply` for a

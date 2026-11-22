@@ -96,8 +96,8 @@ pub enum Error {
     #[error("cdk-fiber identifies payments by payment hash, got {0}")]
     UnsupportedIdentifier(String),
 
-    /// `wait_payment_event` was called more than once.
-    #[error("the payment event stream has already been taken")]
+    /// `wait_payment_event` was called while another subscriber owns the stream.
+    #[error("the payment event stream already has an active subscriber")]
     StreamAlreadyTaken,
 }
 
