@@ -43,6 +43,9 @@ that hostname.
   every existing quote reach a terminal state. The processor cannot reconstruct pre-journal
   quote/principal bindings from the mint or Fiber database, and intentionally rejects a terminal
   result that lacks them. Back up the mint, Fiber, and processor volumes together before resuming.
+- Before upgrading a journal-backed processor, stop the stack and back up `processor-data`. Journal
+  schema v2 migrates v1 atomically and restores unresolved dispatched cash-outs without replaying
+  terminal records, but the backup is the rollback boundary for the database upgrade.
 
 Changing the wallet's compiled default only affects new browser profiles. Returning browsers retain
 their selected mint URL in local storage and must explicitly switch mints; balances stay isolated by

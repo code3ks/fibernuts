@@ -254,6 +254,10 @@ That string is the only signal a payment was never dispatched. It must map to
 tolerantly.
 
 `GetPaymentCommandResult` returns `fee` but **not** `amount`. Track the amount from the invoice.
+For a request that returns while the payment is still pending, `cdk-fiber` persists the original
+quote ID, invoice principal, fee ceiling, payment hash, and dispatch boundary. Its recovery worker
+queries that same session after restart and emits `PaymentSuccessful` or `PaymentFailed` with the
+original quote ID. It never uses a missing response as permission to dispatch again.
 
 ### Paying by invoice merges the rest
 
@@ -374,18 +378,18 @@ keyset.
 - **A paid result can still lack `payment_proof`.** Fiber `v0.10.1` normally exposes the successful
   preimage, but the field is optional for migrated or older records. Paid state remains
   authoritative; absence of an out-of-band proof does not turn settlement into failure.
-- **Incoming stream wakeups are durable but not end-to-end acknowledged.** `cdk-fiber` restores
-  nonterminal incoming watches from its journal and durably claims each push notification before
-  yielding it, so it hands a payment hash to the stream at most once. CDK 0.18's `MintPayment`
-  stream has no acknowledgement after `handle_payment_notification` commits the mint database. A
-  disconnect after the adapter's durable claim can therefore lose that push wakeup. Correctness
-  does not depend on it: `check_incoming_payment_status` remains authoritative, and CDK deduplicates
-  repeated push or pull observations by payment ID.
+- **Stream wakeups are durable but not end-to-end acknowledged.** `cdk-fiber` restores nonterminal
+  incoming and dispatched outgoing watches from its journal and durably claims each terminal
+  notification before yielding it. CDK 0.18's `MintPayment` stream has no acknowledgement after
+  its mint-database commit, so a disconnect after the adapter's claim can lose that push wakeup.
+  Correctness does not depend on the push alone: incoming and outgoing pull checks remain
+  authoritative and idempotent.
 - **Background invoice polling is bounded.** The processor performs one reconciliation for every
   restored nonterminal incoming record. It then polls through the invoice deadline plus
   `FIBERNUTS_INCOMING_WATCH_GRACE_SECS`. An old open, received, unavailable, or malformed record is
   removed from the process-local watch set after a final check but remains durable and recoverable
   through an explicit status check. It is not converted into failure or removed by retention.
-- **Melt events are not emitted.** `make_payment` awaits a terminal state and returns it. A melt
-  that times out returns `Pending`; the mint resolves it via `check_outgoing_payment`.
+- **A delayed melt remains recoverable without redispatch.** A melt that times out returns
+  `Pending`; the recovery worker and `check_outgoing_payment` query the existing Fiber session.
+  Only node-reported success or terminal failure emits a terminal result.
 - Amountless invoices are rejected — the backend cannot price them.

@@ -146,6 +146,7 @@ fn compare_and_swap_rejects_a_stale_dispatch_writer() {
         .prepare_outgoing_dispatch(QUOTE_A, inserted.revision(), 90, 20)
         .unwrap();
     assert_eq!(prepared.dispatch_count(), 1);
+    assert_eq!(prepared.event_state(), EventState::Pending);
     assert_eq!(
         prepared.observed_state(),
         ObservedState::OutgoingDispatchPrepared
@@ -155,6 +156,10 @@ fn compare_and_swap_rejects_a_stale_dispatch_writer() {
         .prepare_outgoing_dispatch(QUOTE_A, inserted.revision(), 90, 21)
         .unwrap_err();
     assert!(matches!(error, JournalError::ConcurrentUpdate));
+    let error = journal
+        .prepare_outgoing_dispatch(QUOTE_A, prepared.revision(), 90, 22)
+        .unwrap_err();
+    assert!(matches!(error, JournalError::InvalidTransition));
     assert_eq!(
         journal
             .by_quote_id(SettlementDirection::Outgoing, QUOTE_A)
@@ -293,6 +298,218 @@ fn paid_incoming_remains_recoverable_until_event_delivery_is_durable() {
 }
 
 #[test]
+fn terminal_outgoing_remains_recoverable_until_event_delivery_is_durable() {
+    let journal = SettlementJournal::in_memory().unwrap();
+    journal.bind_scope(&scope()).unwrap();
+    let inserted = journal.insert(outgoing(QUOTE_A, HASH_A, 10)).unwrap();
+    let prepared = journal
+        .prepare_outgoing_dispatch(QUOTE_A, inserted.revision(), 90, 20)
+        .unwrap();
+    let paid = journal
+        .record_observation(
+            SettlementDirection::Outgoing,
+            QUOTE_A,
+            ReconciliationObservation {
+                expected_revision: prepared.revision(),
+                state: ObservedState::OutgoingSucceeded,
+                actual_fee_base: Some(1_000_000),
+                checked_at: 21,
+                next_reconcile_at: 22,
+                deadline_unix: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(paid.event_state(), EventState::Pending);
+    assert!(paid.terminal_at().is_none());
+    assert_eq!(journal.recovery_queue().unwrap(), vec![paid.clone()]);
+
+    let delivered = journal
+        .mark_event_delivered(SettlementDirection::Outgoing, QUOTE_A, paid.revision(), 23)
+        .unwrap();
+    assert_eq!(delivered.event_state(), EventState::Delivered);
+    assert_eq!(delivered.terminal_at(), Some(23));
+    assert!(journal.recovery_queue().unwrap().is_empty());
+}
+
+#[test]
+fn version_one_migration_restores_only_unresolved_outgoing_notifications() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("version-one.sqlite3");
+    let restored_path = directory.path().join("restored.sqlite3");
+    {
+        let journal = open_bound(&path);
+        let pending = journal.insert(outgoing(QUOTE_A, HASH_A, 10)).unwrap();
+        journal
+            .prepare_outgoing_dispatch(QUOTE_A, pending.revision(), 90, 20)
+            .unwrap();
+
+        let completed = journal.insert(outgoing(QUOTE_B, HASH_B, 10)).unwrap();
+        let completed = journal
+            .prepare_outgoing_dispatch(QUOTE_B, completed.revision(), 90, 20)
+            .unwrap();
+        let completed = journal
+            .record_observation(
+                SettlementDirection::Outgoing,
+                QUOTE_B,
+                ReconciliationObservation {
+                    expected_revision: completed.revision(),
+                    state: ObservedState::OutgoingSucceeded,
+                    actual_fee_base: Some(1_000_000),
+                    checked_at: 21,
+                    next_reconcile_at: 22,
+                    deadline_unix: None,
+                },
+            )
+            .unwrap();
+        journal
+            .mark_event_delivered(
+                SettlementDirection::Outgoing,
+                QUOTE_B,
+                completed.revision(),
+                23,
+            )
+            .unwrap();
+    }
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE settlement_operations
+             SET event_state = 'not_applicable',
+                 revision = revision - CASE WHEN quote_id = ?1 THEN 1 ELSE 0 END",
+            [QUOTE_B],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let restored = SettlementJournal::restore(&path, &restored_path).unwrap();
+    let restored_pending = restored
+        .by_quote_id(SettlementDirection::Outgoing, QUOTE_A)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored_pending.event_state(), EventState::Pending);
+    assert_eq!(restored.recovery_queue().unwrap(), vec![restored_pending]);
+
+    let migrated = SettlementJournal::open(&path).unwrap();
+    let pending = migrated
+        .by_quote_id(SettlementDirection::Outgoing, QUOTE_A)
+        .unwrap()
+        .unwrap();
+    let completed = migrated
+        .by_quote_id(SettlementDirection::Outgoing, QUOTE_B)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(pending.event_state(), EventState::Pending);
+    assert!(pending.terminal_at().is_none());
+    assert_eq!(completed.event_state(), EventState::NotApplicable);
+    assert!(completed.terminal_at().is_some());
+    assert_eq!(migrated.recovery_queue().unwrap(), vec![pending]);
+}
+
+#[test]
+fn version_one_migration_rejects_a_terminal_row_without_its_terminal_marker() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("corrupt-version-one.sqlite3");
+    {
+        let journal = open_bound(&path);
+        let inserted = journal.insert(outgoing(QUOTE_A, HASH_A, 10)).unwrap();
+        let prepared = journal
+            .prepare_outgoing_dispatch(QUOTE_A, inserted.revision(), 90, 20)
+            .unwrap();
+        let completed = journal
+            .record_observation(
+                SettlementDirection::Outgoing,
+                QUOTE_A,
+                ReconciliationObservation {
+                    expected_revision: prepared.revision(),
+                    state: ObservedState::OutgoingSucceeded,
+                    actual_fee_base: Some(1_000_000),
+                    checked_at: 21,
+                    next_reconcile_at: 22,
+                    deadline_unix: None,
+                },
+            )
+            .unwrap();
+        journal
+            .mark_event_delivered(
+                SettlementDirection::Outgoing,
+                QUOTE_A,
+                completed.revision(),
+                23,
+            )
+            .unwrap();
+    }
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE settlement_operations
+             SET event_state = 'not_applicable', revision = revision - 1, terminal_at = NULL",
+            [],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let error = SettlementJournal::open(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        JournalError::CorruptRecord {
+            field: "v1 outgoing terminal state"
+        }
+    ));
+}
+
+#[test]
+fn version_one_migration_rolls_back_when_transformed_content_is_invalid() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("invalid-version-one.sqlite3");
+    {
+        let journal = open_bound(&path);
+        let inserted = journal.insert(outgoing(QUOTE_A, HASH_A, 10)).unwrap();
+        journal
+            .prepare_outgoing_dispatch(QUOTE_A, inserted.revision(), 90, 20)
+            .unwrap();
+    }
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE settlement_operations
+             SET event_state = 'not_applicable', dispatch_count = 2, revision = 2",
+            [],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let error = SettlementJournal::open(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        JournalError::CorruptRecord {
+            field: "outgoing recovery metadata"
+        }
+    ));
+
+    let connection = Connection::open(&path).unwrap();
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let event_state: String = connection
+        .query_row(
+            "SELECT event_state FROM settlement_operations WHERE quote_id = ?1",
+            [QUOTE_A],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 1);
+    assert_eq!(event_state, "not_applicable");
+}
+
+#[test]
 fn retention_deletes_only_old_terminal_operations() {
     let journal = SettlementJournal::in_memory().unwrap();
     journal.bind_scope(&scope()).unwrap();
@@ -337,7 +554,7 @@ fn a_newer_schema_version_is_rejected_without_mutation() {
         error,
         JournalError::IncompatibleSchema {
             found: 99,
-            supported: 1
+            supported: 2
         }
     ));
 }
