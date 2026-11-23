@@ -156,6 +156,10 @@ fn compare_and_swap_rejects_a_stale_dispatch_writer() {
         .prepare_outgoing_dispatch(QUOTE_A, inserted.revision(), 90, 21)
         .unwrap_err();
     assert!(matches!(error, JournalError::ConcurrentUpdate));
+    let error = journal
+        .prepare_outgoing_dispatch(QUOTE_A, prepared.revision(), 90, 22)
+        .unwrap_err();
+    assert!(matches!(error, JournalError::InvalidTransition));
     assert_eq!(
         journal
             .by_quote_id(SettlementDirection::Outgoing, QUOTE_A)
@@ -403,6 +407,106 @@ fn version_one_migration_restores_only_unresolved_outgoing_notifications() {
     assert_eq!(completed.event_state(), EventState::NotApplicable);
     assert!(completed.terminal_at().is_some());
     assert_eq!(migrated.recovery_queue().unwrap(), vec![pending]);
+}
+
+#[test]
+fn version_one_migration_rejects_a_terminal_row_without_its_terminal_marker() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("corrupt-version-one.sqlite3");
+    {
+        let journal = open_bound(&path);
+        let inserted = journal.insert(outgoing(QUOTE_A, HASH_A, 10)).unwrap();
+        let prepared = journal
+            .prepare_outgoing_dispatch(QUOTE_A, inserted.revision(), 90, 20)
+            .unwrap();
+        let completed = journal
+            .record_observation(
+                SettlementDirection::Outgoing,
+                QUOTE_A,
+                ReconciliationObservation {
+                    expected_revision: prepared.revision(),
+                    state: ObservedState::OutgoingSucceeded,
+                    actual_fee_base: Some(1_000_000),
+                    checked_at: 21,
+                    next_reconcile_at: 22,
+                    deadline_unix: None,
+                },
+            )
+            .unwrap();
+        journal
+            .mark_event_delivered(
+                SettlementDirection::Outgoing,
+                QUOTE_A,
+                completed.revision(),
+                23,
+            )
+            .unwrap();
+    }
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE settlement_operations
+             SET event_state = 'not_applicable', revision = revision - 1, terminal_at = NULL",
+            [],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let error = SettlementJournal::open(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        JournalError::CorruptRecord {
+            field: "v1 outgoing terminal state"
+        }
+    ));
+}
+
+#[test]
+fn version_one_migration_rolls_back_when_transformed_content_is_invalid() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("invalid-version-one.sqlite3");
+    {
+        let journal = open_bound(&path);
+        let inserted = journal.insert(outgoing(QUOTE_A, HASH_A, 10)).unwrap();
+        journal
+            .prepare_outgoing_dispatch(QUOTE_A, inserted.revision(), 90, 20)
+            .unwrap();
+    }
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE settlement_operations
+             SET event_state = 'not_applicable', dispatch_count = 2, revision = 2",
+            [],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let error = SettlementJournal::open(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        JournalError::CorruptRecord {
+            field: "outgoing recovery metadata"
+        }
+    ));
+
+    let connection = Connection::open(&path).unwrap();
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let event_state: String = connection
+        .query_row(
+            "SELECT event_state FROM settlement_operations WHERE quote_id = ?1",
+            [QUOTE_A],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 1);
+    assert_eq!(event_state, "not_applicable");
 }
 
 #[test]

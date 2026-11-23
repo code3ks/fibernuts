@@ -89,7 +89,7 @@ pub enum JournalError {
 }
 
 /// Whether value is entering or leaving the mint over Fiber.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementDirection {
     /// A Fiber invoice whose settlement may make a mint quote eligible for issuance.
     Incoming,
@@ -854,9 +854,11 @@ impl SettlementJournal {
         let current = query_by_quote(&transaction, SettlementDirection::Outgoing, quote_id)?
             .ok_or(JournalError::Conflict)?;
         require_revision(&current, expected_revision)?;
-        if !current
-            .observed_state
-            .can_transition_to(ObservedState::OutgoingDispatchPrepared)
+        if current.dispatch_count != 0
+            || current.event_state != EventState::NotApplicable
+            || !current
+                .observed_state
+                .can_transition_to(ObservedState::OutgoingDispatchPrepared)
         {
             return Err(JournalError::InvalidTransition);
         }
@@ -1259,6 +1261,24 @@ fn migrate_from_empty(connection: &mut Connection) -> Result<(), JournalError> {
 
 fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), JournalError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let invalid_outgoing: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM settlement_operations
+         WHERE direction = 'outgoing'
+           AND (
+               event_state != 'not_applicable'
+               OR (observed_state IN ('outgoing_succeeded', 'outgoing_failed')
+                   AND terminal_at IS NULL)
+               OR (observed_state NOT IN ('outgoing_succeeded', 'outgoing_failed')
+                   AND terminal_at IS NOT NULL)
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_outgoing != 0 {
+        return Err(JournalError::CorruptRecord {
+            field: "v1 outgoing terminal state",
+        });
+    }
     transaction.execute(
         "UPDATE settlement_operations
          SET event_state = 'pending'
@@ -1269,6 +1289,7 @@ fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), JournalError> {
         [],
     )?;
     transaction.pragma_update(None, "user_version", 2)?;
+    validate_semantic_content(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -1468,7 +1489,8 @@ fn validate_record(record: &SettlementOperation, decoded: bool) -> Result<(), Jo
         return Err(invalid("incoming recovery metadata"));
     }
     if record.direction == SettlementDirection::Outgoing
-        && ((record.dispatch_count > 0 && record.deadline_unix.is_none())
+        && ((record.dispatch_count > 1)
+            || (record.dispatch_count > 0 && record.deadline_unix.is_none())
             || (record.observed_state == ObservedState::OutgoingDispatchPrepared
                 && record.dispatch_count == 0))
     {

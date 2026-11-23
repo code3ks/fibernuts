@@ -887,6 +887,48 @@ async fn a_lost_dispatch_response_is_not_resent_after_restart() {
 }
 
 #[tokio::test]
+async fn concurrent_duplicate_melts_cross_one_dispatch_boundary() {
+    let quote_id = QuoteId::new();
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![None]),
+        send_payment: Some(payment(PaymentStatus::Inflight, 0)),
+        ..Script::default()
+    });
+    let (backend, node) = backend_with_journal(node, journal.clone());
+
+    let first_unit = rusd();
+    let second_unit = rusd();
+    let first_options = outgoing_with_quote(None, quote_id.clone());
+    let second_options = outgoing_with_quote(None, quote_id.clone());
+    let (first, second) = tokio::join!(
+        backend.make_payment(&first_unit, first_options),
+        backend.make_payment(&second_unit, second_options)
+    );
+
+    assert!(first.is_ok() || second.is_ok());
+    for response in [first, second].into_iter().flatten() {
+        assert!(matches!(
+            response.status,
+            MeltQuoteState::Pending | MeltQuoteState::Unknown
+        ));
+    }
+    assert_eq!(
+        node.recorded.lock().await.sends.len(),
+        1,
+        "duplicate melt calls must not dispatch two Fiber payments"
+    );
+    assert_eq!(
+        journal
+            .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+            .unwrap()
+            .unwrap()
+            .dispatch_count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn delayed_outgoing_success_is_announced_once_after_restart_with_actual_fee() {
     use futures::StreamExt;
 
