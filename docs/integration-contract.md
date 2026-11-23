@@ -392,4 +392,12 @@ keyset.
 - **A delayed melt remains recoverable without redispatch.** A melt that times out returns
   `Pending`; the recovery worker and `check_outgoing_payment` query the existing Fiber session.
   Only node-reported success or terminal failure emits a terminal result.
+- **Every Fiber RPC is bounded.** The HTTP client has separate connection and complete-request
+  deadlines, and the backend applies the request deadline again around injected transports. The
+  foreground melt deadline also bounds its final status query. A timed-out `send_payment` remains
+  an ambiguous dispatched attempt and is reconciled by payment hash; it is never sent again.
+- **Reconciliation is concurrent but capped.** Incoming and outgoing watches share one scheduler
+  limit. Read-only query errors use bounded exponential backoff with deterministic jitter, while a
+  valid observation resets the backoff. Aggregate latency, timeout, retry, and backlog counters
+  exclude operation identifiers and payment data.
 - Amountless invoices are rejected — the backend cannot price them.

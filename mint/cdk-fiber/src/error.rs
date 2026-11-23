@@ -4,6 +4,19 @@ use thiserror::Error;
 
 use crate::journal::JournalError;
 
+/// Operational class of a Fiber RPC failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcFailureClass {
+    /// No authoritative JSON-RPC response was received; a read-only query may be retried.
+    RetryableTransport,
+    /// The node or HTTP endpoint authoritatively rejected the request.
+    AuthoritativeProtocol,
+    /// A response arrived but could not be validated or decoded safely.
+    InvalidResponse,
+    /// The failure happened before or after the RPC boundary in local protocol logic.
+    Local,
+}
+
 /// Everything that can go wrong between the mint and the Fiber node.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -14,6 +27,20 @@ pub enum Error {
     /// The HTTP request to the node never produced a JSON-RPC response.
     #[error("fiber node unreachable: {0}")]
     Transport(String),
+
+    /// The configured request deadline elapsed without a complete response.
+    #[error("fiber node `{operation}` request exceeded its deadline")]
+    RpcTimeout {
+        /// JSON-RPC method whose deadline elapsed.
+        operation: &'static str,
+    },
+
+    /// The HTTP endpoint rejected the request before a JSON-RPC envelope was returned.
+    #[error("fiber node returned HTTP status {status}")]
+    HttpStatus {
+        /// HTTP response status code.
+        status: u16,
+    },
 
     /// The node answered with a JSON-RPC error object.
     #[error("fiber node rpc error {code}: {message}")]
@@ -99,6 +126,39 @@ pub enum Error {
     /// `wait_payment_event` was called while another subscriber owns the stream.
     #[error("the payment event stream already has an active subscriber")]
     StreamAlreadyTaken,
+
+    /// A backend setting cannot provide the required bounded behavior.
+    #[error("invalid `{field}` configuration: {reason}")]
+    InvalidConfiguration {
+        /// Configuration field that failed validation.
+        field: &'static str,
+        /// Stable, non-sensitive explanation of the constraint.
+        reason: &'static str,
+    },
+}
+
+impl Error {
+    /// Classify whether an RPC-related failure is retryable without inspecting error text.
+    pub fn rpc_failure_class(&self) -> RpcFailureClass {
+        match self {
+            Self::Transport(_) | Self::RpcTimeout { .. } => RpcFailureClass::RetryableTransport,
+            Self::HttpStatus { status }
+                if *status == 408 || *status == 429 || (500..=599).contains(status) =>
+            {
+                RpcFailureClass::RetryableTransport
+            }
+            Self::HttpStatus { .. } | Self::Rpc { .. } => RpcFailureClass::AuthoritativeProtocol,
+            Self::Decode(_)
+            | Self::InvalidHash(_)
+            | Self::PaymentHashMismatch
+            | Self::InvoiceNetworkMismatch { .. }
+            | Self::InvalidInvoiceAsset
+            | Self::InvoiceAssetMismatch
+            | Self::AmountlessInvoice
+            | Self::Journal(JournalError::Conflict) => RpcFailureClass::InvalidResponse,
+            _ => RpcFailureClass::Local,
+        }
+    }
 }
 
 impl From<Error> for cdk_common::payment::Error {
@@ -110,5 +170,45 @@ impl From<Error> for cdk_common::payment::Error {
 impl From<JournalError> for cdk_common::payment::Error {
     fn from(e: JournalError) -> Self {
         Self::from(Error::Journal(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_and_protocol_failures_have_distinct_retry_classes() {
+        assert_eq!(
+            Error::Transport("disconnected".to_string()).rpc_failure_class(),
+            RpcFailureClass::RetryableTransport
+        );
+        assert_eq!(
+            Error::RpcTimeout {
+                operation: "get_payment"
+            }
+            .rpc_failure_class(),
+            RpcFailureClass::RetryableTransport
+        );
+        assert_eq!(
+            Error::HttpStatus { status: 503 }.rpc_failure_class(),
+            RpcFailureClass::RetryableTransport
+        );
+        assert_eq!(
+            Error::Rpc {
+                code: -32_000,
+                message: "request rejected".to_string(),
+            }
+            .rpc_failure_class(),
+            RpcFailureClass::AuthoritativeProtocol
+        );
+        assert_eq!(
+            Error::HttpStatus { status: 400 }.rpc_failure_class(),
+            RpcFailureClass::AuthoritativeProtocol
+        );
+        assert_eq!(
+            Error::Decode("malformed response".to_string()).rpc_failure_class(),
+            RpcFailureClass::InvalidResponse
+        );
     }
 }

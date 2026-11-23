@@ -75,6 +75,19 @@ fn load_config() -> Result<FiberConfig> {
         fee_percent: env_parse("FIBERNUTS_FEE_PERCENT", 1u8)?,
         min_fee_reserve: env_parse("FIBERNUTS_MIN_FEE_RESERVE", 1u64)?,
         poll_interval: Duration::from_secs(env_parse("FIBERNUTS_POLL_SECS", 3u64)?),
+        rpc_connect_timeout: Duration::from_secs(env_parse(
+            "FIBERNUTS_RPC_CONNECT_TIMEOUT_SECS",
+            3u64,
+        )?),
+        rpc_request_timeout: Duration::from_secs(env_parse(
+            "FIBERNUTS_RPC_REQUEST_TIMEOUT_SECS",
+            10u64,
+        )?),
+        reconciliation_max_backoff: Duration::from_secs(env_parse(
+            "FIBERNUTS_RECONCILE_MAX_BACKOFF_SECS",
+            60u64,
+        )?),
+        reconciliation_concurrency: env_parse("FIBERNUTS_RECONCILE_CONCURRENCY", 8usize)?,
         incoming_watch_grace: Duration::from_secs(env_parse(
             "FIBERNUTS_INCOMING_WATCH_GRACE_SECS",
             86_400u64,
@@ -120,6 +133,9 @@ async fn main() -> Result<()> {
         unit = %config.unit,
         scale = config.unit_scale,
         udt = config.udt_type_script.is_some(),
+        rpc_connect_timeout_secs = config.rpc_connect_timeout.as_secs(),
+        rpc_request_timeout_secs = config.rpc_request_timeout.as_secs(),
+        reconciliation_concurrency = config.reconciliation_concurrency,
         pruned_terminal_operations = pruned,
         "starting fibernuts-processor"
     );

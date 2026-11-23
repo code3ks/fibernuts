@@ -155,9 +155,13 @@ the required persistent `FIBERNUTS_JOURNAL_PATH`, `FIBERNUTS_LISTEN_ADDR` (a bar
 `FIBERNUTS_LISTEN_PORT`, `FIBERNUTS_UNIT`, `FIBERNUTS_UNIT_SCALE`,
 `FIBERNUTS_NETWORK`, `FIBERNUTS_UDT_CODE_HASH` / `FIBERNUTS_UDT_ARGS` (or `native` for CKB),
 `FIBERNUTS_FEE_PERCENT`, `FIBERNUTS_MIN_FEE_RESERVE`, `FIBERNUTS_POLL_SECS`,
+`FIBERNUTS_RPC_CONNECT_TIMEOUT_SECS`, `FIBERNUTS_RPC_REQUEST_TIMEOUT_SECS`,
+`FIBERNUTS_RECONCILE_MAX_BACKOFF_SECS`, `FIBERNUTS_RECONCILE_CONCURRENCY`,
 `FIBERNUTS_PAYMENT_TIMEOUT_SECS`, `FIBERNUTS_INCOMING_WATCH_GRACE_SECS`, and
-`FIBERNUTS_JOURNAL_RETENTION_SECS`. Settlement records are bound to the mint URL, unit, network,
-scale, and exact asset; only old terminal records are pruned.
+`FIBERNUTS_JOURNAL_RETENTION_SECS`. Every node call has a deadline. Read-only recovery queries use
+bounded jittered backoff and bounded concurrency; a timed-out value-moving call is reconciled by
+its durable payment hash and is never blindly repeated. Settlement records are bound to the mint
+URL, unit, network, scale, and exact asset; only old terminal records are pruned.
 
 ## Money safety
 

@@ -4,8 +4,9 @@
 //! behaviour of the real Fiber node verified against the pinned stable Fiber source.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cdk_common::nuts::MeltQuoteState;
@@ -19,7 +20,8 @@ use tokio::sync::Mutex;
 
 use cdk_fiber::error::Error;
 use cdk_fiber::journal::{
-    EventState, ObservedState, ReconciliationErrorClass, SettlementDirection,
+    EventState, JournalScope, NewSettlementOperation, ObservedState, ReconciliationErrorClass,
+    SettlementAsset, SettlementDirection,
 };
 use cdk_fiber::rpc::FiberRpc;
 use cdk_fiber::wire::{
@@ -30,6 +32,7 @@ use cdk_fiber::{FiberBackend, FiberConfig, SettlementJournal};
 
 const HASH_HEX: &str = "0x5e51a85b7382b235440249867bc49e43fb30afb21bcf4663cb2ebf4f97c60078";
 const OTHER_HASH_HEX: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const THIRD_HASH_HEX: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const INVOICE: &str = "fibt1001pqn7qyqsm6uqzg7dwfhdvmratf9umr7lfhtc";
 const SCALE: u64 = 1_000_000;
 const PACKED_RUSD_SCRIPT: &str = concat!(
@@ -49,6 +52,12 @@ fn invoice(amount: Option<u128>) -> CkbInvoice {
         amount,
         vec![serde_json::json!({ "udt_script": PACKED_RUSD_SCRIPT })],
     )
+}
+
+fn invoice_for_hash(hash: &str, amount: Option<u128>) -> CkbInvoice {
+    let mut invoice = invoice(amount);
+    invoice.data.payment_hash = hash.to_string();
+    invoice
 }
 
 fn invoice_with(
@@ -93,10 +102,14 @@ struct Script {
     invoice_status: Option<CkbInvoiceStatus>,
     invoice_result: Option<GetInvoiceResult>,
     invoice_error: bool,
+    invoice_errors_remaining: usize,
     parsed_invoice: Option<CkbInvoice>,
     /// Popped per call; the last entry repeats once exhausted.
     get_payment: VecDeque<Option<PaymentResult>>,
+    /// Popped per call; the last delay repeats once exhausted.
+    get_payment_delays: VecDeque<Duration>,
     send_payment: Option<PaymentResult>,
+    send_delay: Option<Duration>,
     send_error: bool,
     get_error: bool,
 }
@@ -144,8 +157,9 @@ impl FiberRpc for MockNode {
             .await
             .invoice_lookups
             .push(payment_hash.to_string());
-        let script = self.script.lock().await;
-        if script.invoice_error {
+        let mut script = self.script.lock().await;
+        if script.invoice_error || script.invoice_errors_remaining > 0 {
+            script.invoice_errors_remaining = script.invoice_errors_remaining.saturating_sub(1);
             return Err(Error::Transport("synthetic invoice RPC outage".to_string()));
         }
         if let Some(result) = script.invoice_result.clone() {
@@ -172,33 +186,46 @@ impl FiberRpc for MockNode {
     async fn send_payment(&self, params: SendPaymentParams) -> Result<PaymentResult, Error> {
         self.recorded.lock().await.sends.push(params.clone());
         let script = self.script.lock().await;
-        if script.send_error {
+        let send_error = script.send_error;
+        let delay = script.send_delay;
+        let result = script
+            .send_payment
+            .clone()
+            .unwrap_or_else(|| payment(PaymentStatus::Created, 0));
+        drop(script);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        if send_error {
             return Err(Error::Rpc {
                 code: -32000,
                 message: "Send payment error: Failed to build route".to_string(),
             });
         }
-        Ok(script
-            .send_payment
-            .clone()
-            .unwrap_or_else(|| payment(PaymentStatus::Created, 0)))
+        Ok(result)
     }
 
     async fn get_payment(&self, _payment_hash: &str) -> Result<Option<PaymentResult>, Error> {
         let mut script = self.script.lock().await;
-        if script.get_error {
+        let get_error = script.get_error;
+        let delay = match script.get_payment_delays.len() {
+            0 => Duration::ZERO,
+            1 => script.get_payment_delays[0],
+            _ => script.get_payment_delays.pop_front().unwrap_or_default(),
+        };
+        let result = match script.get_payment.len() {
+            0 => None,
+            1 => script.get_payment[0].clone(),
+            _ => script.get_payment.pop_front().flatten(),
+        };
+        drop(script);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        if get_error {
             return Err(Error::Transport("synthetic RPC outage".to_string()));
         }
-        match script.get_payment.len() {
-            0 => Ok(None),
-            1 => Ok(script.get_payment[0].clone()),
-            _ => Ok(script
-                .get_payment
-                .pop_front()
-                .flatten()
-                .map(Some)
-                .unwrap_or(None)),
-        }
+        Ok(result)
     }
 }
 
@@ -235,6 +262,104 @@ fn backend_with_config(
         FiberBackend::new(node.clone(), config, journal).unwrap(),
         node,
     )
+}
+
+fn insert_incoming_operation(
+    journal: &SettlementJournal,
+    config: &FiberConfig,
+    payment_hash: &str,
+) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let scope = JournalScope::new(
+        config.mint_url.clone(),
+        config.unit.to_string(),
+        config.unit_scale,
+        config.currency,
+        SettlementAsset::from(config.udt_type_script.clone()),
+    );
+    journal
+        .insert(NewSettlementOperation::incoming(
+            scope,
+            QuoteId::new().to_string(),
+            payment_hash,
+            "synthetic-fiber-invoice",
+            AMOUNT_BASE,
+            now.saturating_add(60),
+            now,
+        ))
+        .unwrap();
+}
+
+struct ActiveRpc<'a> {
+    active: &'a AtomicUsize,
+}
+
+impl Drop for ActiveRpc<'_> {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct IsolatingNode {
+    active: AtomicUsize,
+    maximum_active: AtomicUsize,
+}
+
+impl IsolatingNode {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicUsize::new(0),
+            maximum_active: AtomicUsize::new(0),
+        })
+    }
+
+    fn begin_rpc(&self) -> ActiveRpc<'_> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.maximum_active.fetch_max(active, Ordering::SeqCst);
+        ActiveRpc {
+            active: &self.active,
+        }
+    }
+}
+
+impl std::fmt::Debug for IsolatingNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IsolatingNode")
+    }
+}
+
+#[async_trait]
+impl FiberRpc for IsolatingNode {
+    async fn new_invoice(&self, _params: NewInvoiceParams) -> Result<InvoiceResult, Error> {
+        unreachable!("the isolation test restores durable invoice watches")
+    }
+
+    async fn get_invoice(&self, payment_hash: &str) -> Result<GetInvoiceResult, Error> {
+        let _active = self.begin_rpc();
+        if payment_hash == HASH_HEX {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        Ok(GetInvoiceResult {
+            invoice: invoice_for_hash(payment_hash, Some(AMOUNT_BASE)),
+            status: CkbInvoiceStatus::Paid,
+        })
+    }
+
+    async fn parse_invoice(&self, _invoice: &str) -> Result<ParseInvoiceResult, Error> {
+        unreachable!("the isolation test does not parse outgoing invoices")
+    }
+
+    async fn send_payment(&self, _params: SendPaymentParams) -> Result<PaymentResult, Error> {
+        unreachable!("the isolation test does not dispatch payments")
+    }
+
+    async fn get_payment(&self, _payment_hash: &str) -> Result<Option<PaymentResult>, Error> {
+        unreachable!("the isolation test has no outgoing payments")
+    }
 }
 
 fn rusd() -> CurrencyUnit {
@@ -1681,4 +1806,191 @@ async fn an_old_unavailable_watch_is_checked_once_then_left_for_manual_recovery(
         .is_err());
     assert_eq!(node.recorded.lock().await.invoice_lookups.len(), 2);
     backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stalled_rpc_reaches_its_deadline_without_blocking_other_reconciliation() {
+    use futures::StreamExt;
+
+    let node = IsolatingNode::new();
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let mut bounded = config();
+    bounded.rpc_request_timeout = Duration::from_millis(200);
+    bounded.reconciliation_concurrency = 2;
+    let backend = FiberBackend::new(node.clone(), bounded.clone(), journal.clone()).unwrap();
+    for hash in [HASH_HEX, OTHER_HASH_HEX, THIRD_HASH_HEX] {
+        insert_incoming_operation(&journal, &bounded, hash);
+    }
+
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+    let event = tokio::time::timeout(Duration::from_millis(100), stream.next())
+        .await
+        .expect("an unrelated invoice must settle before the stalled RPC deadline")
+        .expect("the event stream must remain open");
+    let reported_hash = match event {
+        cdk_common::payment::Event::PaymentReceived(received) => received.payment_identifier,
+        other => panic!("expected PaymentReceived, got {other:?}"),
+    };
+    assert_ne!(reported_hash, hash_id());
+
+    for _ in 0..60 {
+        if backend.settlement_metrics().rpc_timeouts_total > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let metrics = backend.settlement_metrics();
+    assert_eq!(metrics.rpc_timeouts_total, 1);
+    assert_eq!(metrics.reconciliation_in_flight, 0);
+    assert_eq!(node.maximum_active.load(Ordering::SeqCst), 2);
+    assert!(
+        node.maximum_active.load(Ordering::SeqCst) <= bounded.reconciliation_concurrency,
+        "the scheduler must enforce its global concurrency limit"
+    );
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_slow_status_query_cannot_extend_make_payment_past_its_operation_deadline() {
+    let (backend, _) = backend(Script {
+        get_payment: VecDeque::from(vec![None, Some(payment(PaymentStatus::Inflight, 0))]),
+        get_payment_delays: VecDeque::from(vec![Duration::ZERO, Duration::from_secs(1)]),
+        send_payment: Some(payment(PaymentStatus::Inflight, 0)),
+        ..Script::default()
+    });
+    let started = tokio::time::Instant::now();
+
+    let response = backend.make_payment(&rusd(), outgoing(None)).await.unwrap();
+
+    assert_eq!(response.status, MeltQuoteState::Pending);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_eq!(backend.settlement_metrics().rpc_timeouts_total, 1);
+}
+
+#[tokio::test]
+async fn a_timed_out_dispatch_is_reconciled_and_never_sent_twice() {
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![None]),
+        send_delay: Some(Duration::from_secs(1)),
+        ..Script::default()
+    });
+    let mut bounded = config();
+    bounded.rpc_request_timeout = Duration::from_millis(20);
+    bounded.payment_timeout = Duration::from_millis(100);
+    let (backend, node) = backend_with_config(node, journal.clone(), bounded);
+    let quote_id = QuoteId::new();
+
+    assert!(backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .is_err());
+    let timed_out = journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(timed_out.dispatch_count(), 1);
+    assert_eq!(
+        timed_out.last_error_class(),
+        Some(ReconciliationErrorClass::Timeout)
+    );
+    let retry = backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(retry.status, MeltQuoteState::Unknown);
+    assert_eq!(node.recorded.lock().await.sends.len(), 1);
+    let operation = journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.dispatch_count(), 1);
+    assert_eq!(operation.last_error_class(), None);
+    let metrics = backend.settlement_metrics();
+    assert_eq!(metrics.rpc_timeouts_total, 1);
+    assert_eq!(metrics.reconciliation_retries_total, 1);
+}
+
+#[tokio::test]
+async fn a_transport_outage_backs_off_then_recovers_without_losing_the_watch() {
+    use futures::StreamExt;
+
+    let node = MockNode::new(Script {
+        invoice_status: Some(CkbInvoiceStatus::Paid),
+        invoice_errors_remaining: 1,
+        ..Script::default()
+    });
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let mut bounded = config();
+    bounded.reconciliation_max_backoff = Duration::from_secs(1);
+    let (backend, _) = backend_with_config(node, journal.clone(), bounded);
+    backend
+        .create_incoming_payment_request(incoming(AMOUNT_ECASH, rusd()))
+        .await
+        .unwrap();
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(3), stream.next())
+        .await
+        .expect("the retry must observe the recovered endpoint")
+        .expect("the event stream must remain open");
+    assert!(matches!(
+        event,
+        cdk_common::payment::Event::PaymentReceived(_)
+    ));
+    let operation = journal
+        .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.observed_state(), ObservedState::IncomingPaid);
+    assert_eq!(operation.last_error_class(), None);
+    assert!(operation.reconciliation_count() >= 2);
+    let metrics = backend.settlement_metrics();
+    assert_eq!(metrics.rpc_transport_failures_total, 1);
+    assert_eq!(metrics.reconciliation_retries_total, 1);
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn repeated_transport_errors_use_bounded_jittered_backoff() {
+    let node = MockNode::new(Script {
+        invoice_error: true,
+        ..Script::default()
+    });
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let mut bounded = config();
+    bounded.poll_interval = Duration::from_secs(1);
+    bounded.reconciliation_max_backoff = Duration::from_secs(4);
+    let (backend, _) = backend_with_config(node, journal.clone(), bounded);
+    backend
+        .create_incoming_payment_request(incoming(AMOUNT_ECASH, rusd()))
+        .await
+        .unwrap();
+
+    let mut delays = Vec::new();
+    for _ in 0..6 {
+        assert!(backend
+            .check_incoming_payment_status(&hash_id())
+            .await
+            .is_err());
+        let operation = journal
+            .by_payment_hash(SettlementDirection::Incoming, HASH_HEX)
+            .unwrap()
+            .unwrap();
+        delays.push(
+            operation
+                .next_reconcile_at()
+                .saturating_sub(operation.last_reconciled_at().unwrap()),
+        );
+    }
+
+    assert!(delays.iter().all(|delay| (1..=4).contains(delay)));
+    assert!(
+        delays.iter().any(|delay| *delay > 1),
+        "repeated errors must grow beyond the base poll interval"
+    );
+    assert_eq!(backend.settlement_metrics().reconciliation_retries_total, 6);
 }

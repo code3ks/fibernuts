@@ -47,6 +47,18 @@ pub struct FiberConfig {
     /// How often to poll the node for invoice settlement and payment progress.
     pub poll_interval: Duration,
 
+    /// Maximum time allowed to establish an HTTP connection to the Fiber node.
+    pub rpc_connect_timeout: Duration,
+
+    /// Maximum time allowed for one complete Fiber JSON-RPC request and response.
+    pub rpc_request_timeout: Duration,
+
+    /// Longest delay between read-only reconciliation attempts after repeated errors.
+    pub reconciliation_max_backoff: Duration,
+
+    /// Maximum number of settlement records reconciled concurrently.
+    pub reconciliation_concurrency: usize,
+
     /// How long background invoice reconciliation continues after the invoice deadline. A record
     /// remains durable after this grace period and can still be reconciled by an explicit status
     /// check.
@@ -69,6 +81,10 @@ impl FiberConfig {
             fee_percent: 1,
             min_fee_reserve: 1,
             poll_interval: Duration::from_secs(3),
+            rpc_connect_timeout: Duration::from_secs(3),
+            rpc_request_timeout: Duration::from_secs(10),
+            reconciliation_max_backoff: Duration::from_secs(60),
+            reconciliation_concurrency: 8,
             incoming_watch_grace: Duration::from_secs(86_400),
             payment_timeout: Duration::from_secs(60),
         }

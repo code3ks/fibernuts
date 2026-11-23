@@ -30,6 +30,7 @@
 #![warn(missing_docs)]
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -53,20 +54,24 @@ pub mod amount;
 pub mod config;
 pub mod error;
 pub mod journal;
+pub mod metrics;
 pub mod rpc;
 pub mod wire;
 
 pub use config::FiberConfig;
 pub use error::Error;
 pub use journal::SettlementJournal;
+pub use metrics::ReconciliationMetricsSnapshot;
 pub use rpc::{FiberRpc, HttpFiberRpc};
 pub use wire::CkbInvoiceStatus;
 
+use error::RpcFailureClass;
 use journal::{
     EventState, JournalError, JournalScope, NewSettlementOperation, ObservedState,
     ReconciliationErrorClass, ReconciliationObservation, SettlementAsset, SettlementDirection,
     SettlementOperation,
 };
+use metrics::ReconciliationMetrics;
 use wire::{NewInvoiceParams, PaymentStatus, SendPaymentParams};
 
 /// The single Cashu payment method this backend serves.
@@ -98,6 +103,7 @@ struct Inner {
     outgoing: Mutex<WatchState>,
     cancel: CancellationToken,
     stream_active: AtomicBool,
+    metrics: ReconciliationMetrics,
 }
 
 impl std::fmt::Debug for Inner {
@@ -180,6 +186,7 @@ impl FiberBackend {
         config: FiberConfig,
         journal: Arc<SettlementJournal>,
     ) -> Result<Self, Error> {
+        validate_config(&config)?;
         let scope = JournalScope::new(
             config.mint_url.clone(),
             config.unit.to_string(),
@@ -201,6 +208,7 @@ impl FiberBackend {
                 outgoing: Mutex::new(WatchState::default()),
                 cancel: CancellationToken::new(),
                 stream_active: AtomicBool::new(false),
+                metrics: ReconciliationMetrics::default(),
             }),
         })
     }
@@ -211,12 +219,23 @@ impl FiberBackend {
         config: FiberConfig,
         journal: Arc<SettlementJournal>,
     ) -> Result<Self, Error> {
-        Self::new(Arc::new(HttpFiberRpc::new(rpc_url)), config, journal)
+        let rpc = HttpFiberRpc::with_timeouts(
+            rpc_url,
+            config.rpc_connect_timeout,
+            config.rpc_request_timeout,
+        )?;
+        Self::new(Arc::new(rpc), config, journal)
     }
 
     /// The unit this backend settles in.
     pub fn unit(&self) -> &CurrencyUnit {
         &self.inner.config.unit
+    }
+
+    /// Return aggregate RPC and reconciliation counters without operation identifiers.
+    pub fn settlement_metrics(&self) -> ReconciliationMetricsSnapshot {
+        self.refresh_backlog_metric();
+        self.inner.metrics.snapshot()
     }
 
     fn ensure_unit(&self, requested: &CurrencyUnit) -> Result<(), Error> {
@@ -247,13 +266,94 @@ impl FiberBackend {
             .as_secs()
     }
 
-    fn next_reconcile_at(&self, now: u64) -> u64 {
-        now.saturating_add(self.inner.config.poll_interval.as_secs().max(1))
+    fn next_reconcile_at(&self, operation: &SettlementOperation, now: u64) -> u64 {
+        self.cap_reconcile_at(
+            operation,
+            now,
+            self.inner.config.poll_interval.as_secs().max(1),
+        )
+    }
+
+    fn retry_reconcile_at(&self, operation: &SettlementOperation, now: u64) -> u64 {
+        let base = self.inner.config.poll_interval.as_secs().max(1);
+        let maximum = self
+            .inner
+            .config
+            .reconciliation_max_backoff
+            .as_secs()
+            .max(base);
+        let previous = if operation.last_error_class().is_some() {
+            operation
+                .last_reconciled_at()
+                .map(|checked| operation.next_reconcile_at().saturating_sub(checked))
+                .unwrap_or(base)
+                .max(base)
+        } else {
+            base
+        };
+        let upper = previous.saturating_mul(2).clamp(base, maximum);
+        let lower = (upper / 2).max(base);
+        let spread = upper.saturating_sub(lower);
+        let jitter = if spread == 0 {
+            0
+        } else {
+            reconciliation_jitter(operation.payment_hash(), operation.reconciliation_count())
+                % spread.saturating_add(1)
+        };
+        self.cap_reconcile_at(operation, now, lower.saturating_add(jitter))
+    }
+
+    fn cap_reconcile_at(&self, operation: &SettlementOperation, now: u64, delay_secs: u64) -> u64 {
+        let scheduled = now.saturating_add(delay_secs.max(1));
+        let deadline = operation
+            .deadline_unix()
+            .map(|deadline| match operation.direction() {
+                SettlementDirection::Incoming => {
+                    deadline.saturating_add(self.inner.config.incoming_watch_grace.as_secs())
+                }
+                SettlementDirection::Outgoing => deadline,
+            });
+        match deadline {
+            Some(deadline) if deadline > now => scheduled.min(deadline),
+            _ => scheduled,
+        }
+    }
+
+    async fn rpc_call<T, F>(&self, operation: &'static str, future: F) -> Result<T, Error>
+    where
+        F: Future<Output = Result<T, Error>>,
+    {
+        self.rpc_call_with_timeout(operation, self.inner.config.rpc_request_timeout, future)
+            .await
+    }
+
+    async fn rpc_call_with_timeout<T, F>(
+        &self,
+        operation: &'static str,
+        timeout: Duration,
+        future: F,
+    ) -> Result<T, Error>
+    where
+        F: Future<Output = Result<T, Error>>,
+    {
+        let started = tokio::time::Instant::now();
+        let result = match tokio::time::timeout(timeout, future).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::RpcTimeout { operation }),
+        };
+        let failure = result.as_ref().err().map(Error::rpc_failure_class);
+        if matches!(&result, Err(Error::RpcTimeout { .. })) {
+            self.inner.metrics.record_timeout();
+        }
+        self.inner.metrics.record_rpc(started.elapsed(), failure);
+        result
     }
 
     /// Resolve the invoice a melt refers to into its payment hash and amount.
     async fn resolve_invoice(&self, invoice: &str) -> Result<([u8; 32], String, u128), Error> {
-        let parsed = self.inner.rpc.parse_invoice(invoice).await?;
+        let parsed = self
+            .rpc_call("parse_invoice", self.inner.rpc.parse_invoice(invoice))
+            .await?;
         let hash_hex = parsed.invoice.data.payment_hash.clone();
         self.validate_invoice(&hash_hex, &parsed.invoice, None)?;
         let hash = wire::hash_from_hex(&hash_hex)?;
@@ -354,7 +454,7 @@ impl FiberBackend {
                 state,
                 actual_fee_base,
                 checked_at: now,
-                next_reconcile_at: self.next_reconcile_at(now),
+                next_reconcile_at: self.next_reconcile_at(operation, now),
                 deadline_unix: None,
             },
         )?)
@@ -391,17 +491,15 @@ impl FiberBackend {
         error: &Error,
         now: u64,
     ) -> Result<(), Error> {
-        let class = match error {
-            Error::Transport(_) => ReconciliationErrorClass::RpcUnavailable,
-            Error::Decode(_)
-            | Error::InvalidHash(_)
-            | Error::PaymentHashMismatch
-            | Error::InvoiceNetworkMismatch { .. }
-            | Error::InvalidInvoiceAsset
-            | Error::InvoiceAssetMismatch
-            | Error::AmountlessInvoice
-            | Error::Journal(JournalError::Conflict) => ReconciliationErrorClass::InvalidResponse,
-            _ => ReconciliationErrorClass::NodeRejected,
+        let class = match error.rpc_failure_class() {
+            RpcFailureClass::RetryableTransport => match error {
+                Error::RpcTimeout { .. } => ReconciliationErrorClass::Timeout,
+                _ => ReconciliationErrorClass::RpcUnavailable,
+            },
+            RpcFailureClass::AuthoritativeProtocol => ReconciliationErrorClass::NodeRejected,
+            RpcFailureClass::InvalidResponse | RpcFailureClass::Local => {
+                ReconciliationErrorClass::InvalidResponse
+            }
         };
         let mut current = operation.clone();
         for _ in 0..3 {
@@ -414,9 +512,12 @@ impl FiberBackend {
                 current.revision(),
                 class,
                 now,
-                self.next_reconcile_at(now),
+                self.retry_reconcile_at(&current, now),
             ) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    self.inner.metrics.record_retry();
+                    return Ok(());
+                }
                 Err(JournalError::ConcurrentUpdate) => {
                     current = self
                         .inner
@@ -454,7 +555,7 @@ impl FiberBackend {
         &self,
         hash_hex: &str,
         initial: wire::PaymentResult,
-        timeout: Duration,
+        deadline: tokio::time::Instant,
     ) -> Result<wire::PaymentResult, Error> {
         if matches!(
             initial.status,
@@ -463,11 +564,23 @@ impl FiberBackend {
             return Ok(initial);
         }
 
-        let deadline = tokio::time::Instant::now() + timeout;
         let mut latest = initial;
         while tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(self.inner.config.poll_interval).await;
-            match self.inner.rpc.get_payment(hash_hex).await {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            tokio::time::sleep(self.inner.config.poll_interval.min(remaining)).await;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            self.inner.metrics.record_retry();
+            match self
+                .rpc_call_with_timeout(
+                    "get_payment",
+                    self.inner.config.rpc_request_timeout.min(remaining),
+                    self.inner.rpc.get_payment(hash_hex),
+                )
+                .await
+            {
                 Ok(Some(current)) => {
                     self.validate_payment_result(hash_hex, &current)?;
                     let terminal = matches!(
@@ -564,11 +677,42 @@ impl FiberBackend {
     }
 
     fn watched(&self, direction: SettlementDirection) -> Vec<String> {
-        self.watch_state(direction)
+        let mut watched = self
+            .watch_state(direction)
             .watching
             .iter()
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        watched.sort_unstable();
+        watched
+    }
+
+    fn refresh_backlog_metric(&self) {
+        let incoming = {
+            let state = self.watch_state(SettlementDirection::Incoming);
+            state.watching.len().saturating_add(state.queued.len())
+        };
+        let outgoing = {
+            let state = self.watch_state(SettlementDirection::Outgoing);
+            state.watching.len().saturating_add(state.queued.len())
+        };
+        self.inner
+            .metrics
+            .set_backlog(incoming.saturating_add(outgoing));
+    }
+
+    fn queue_payment_event(&self, queued: QueuedPaymentEvent) {
+        match self.inner.events.try_send(queued) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(queued)) => {
+                self.release_notification(queued.direction, &queued.payment_hash);
+                tracing::warn!("payment event queue is full; settlement remains recoverable");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(queued)) => {
+                self.release_notification(queued.direction, &queued.payment_hash);
+                tracing::debug!("payment event stream closed; settlement remains recoverable");
+            }
+        }
     }
 
     fn reserve_notification(&self, direction: SettlementDirection, payment_hash: &str) -> bool {
@@ -639,244 +783,282 @@ impl FiberBackend {
         Err(JournalError::ConcurrentUpdate.into())
     }
 
-    async fn sweep_invoices(&self) {
-        for hash_hex in self.watched(SettlementDirection::Incoming) {
-            let operation = match self
-                .inner
-                .journal
-                .by_payment_hash(SettlementDirection::Incoming, &hash_hex)
-            {
-                Ok(Some(operation)) => operation,
-                Ok(None) => {
-                    tracing::error!("watched invoice is missing from the settlement journal");
-                    self.unwatch(SettlementDirection::Incoming, &hash_hex);
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(error = %error, "settlement journal could not be read");
-                    continue;
-                }
-            };
-            if operation.event_state() != EventState::Pending || operation.terminal_at().is_some() {
-                self.unwatch(SettlementDirection::Incoming, &hash_hex);
-                continue;
+    async fn sweep_reconciliation(&self) {
+        let incoming = self.watched(SettlementDirection::Incoming);
+        let outgoing = self.watched(SettlementDirection::Outgoing);
+        let mut jobs = Vec::with_capacity(incoming.len().saturating_add(outgoing.len()));
+        for index in 0..incoming.len().max(outgoing.len()) {
+            if let Some(hash) = incoming.get(index) {
+                jobs.push((SettlementDirection::Incoming, hash.clone()));
             }
-            let now = Self::now_unix();
-            if operation.next_reconcile_at() > now {
-                continue;
+            if let Some(hash) = outgoing.get(index) {
+                jobs.push((SettlementDirection::Outgoing, hash.clone()));
             }
-            let retire_after_check = self.watch_horizon_elapsed(&operation, now);
-            let invoice = match self.inner.rpc.get_invoice(&hash_hex).await {
-                Ok(invoice) => invoice,
-                Err(e) => {
-                    if let Err(journal_error) = self.record_rpc_error(&operation, &e, now) {
-                        tracing::error!(error = %journal_error, "invoice reconciliation error could not be recorded");
-                    }
-                    tracing::warn!(error = %e, "polling invoice failed");
-                    if retire_after_check {
-                        self.unwatch(SettlementDirection::Incoming, &hash_hex);
-                    }
-                    continue;
-                }
-            };
+        }
 
-            if let Err(error) = self.validate_invoice(
-                &hash_hex,
-                &invoice.invoice,
-                Some(operation.principal_base()),
-            ) {
+        self.refresh_backlog_metric();
+        futures::stream::iter(jobs)
+            .for_each_concurrent(
+                self.inner.config.reconciliation_concurrency,
+                |(direction, payment_hash)| {
+                    let backend = self.clone();
+                    async move {
+                        let _active = backend.inner.metrics.begin_reconciliation();
+                        match direction {
+                            SettlementDirection::Incoming => {
+                                backend.reconcile_invoice(payment_hash).await
+                            }
+                            SettlementDirection::Outgoing => {
+                                backend.reconcile_outgoing_payment(payment_hash).await
+                            }
+                        }
+                    }
+                },
+            )
+            .await;
+        self.refresh_backlog_metric();
+
+        let metrics = self.inner.metrics.snapshot();
+        tracing::trace!(
+            target: "cdk_fiber::metrics",
+            rpc_calls_total = metrics.rpc_calls_total,
+            rpc_latency_micros_total = metrics.rpc_latency_micros_total,
+            rpc_latency_micros_max = metrics.rpc_latency_micros_max,
+            rpc_timeouts_total = metrics.rpc_timeouts_total,
+            rpc_transport_failures_total = metrics.rpc_transport_failures_total,
+            rpc_protocol_failures_total = metrics.rpc_protocol_failures_total,
+            rpc_invalid_responses_total = metrics.rpc_invalid_responses_total,
+            reconciliation_retries_total = metrics.reconciliation_retries_total,
+            reconciliation_backlog = metrics.reconciliation_backlog,
+            reconciliation_in_flight = metrics.reconciliation_in_flight,
+            "settlement reconciliation metrics"
+        );
+    }
+
+    async fn reconcile_invoice(&self, hash_hex: String) {
+        let operation = match self
+            .inner
+            .journal
+            .by_payment_hash(SettlementDirection::Incoming, &hash_hex)
+        {
+            Ok(Some(operation)) => operation,
+            Ok(None) => {
+                tracing::error!("watched invoice is missing from the settlement journal");
+                self.unwatch(SettlementDirection::Incoming, &hash_hex);
+                return;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "settlement journal could not be read");
+                return;
+            }
+        };
+        if operation.event_state() != EventState::Pending || operation.terminal_at().is_some() {
+            self.unwatch(SettlementDirection::Incoming, &hash_hex);
+            return;
+        }
+        let now = Self::now_unix();
+        if operation.next_reconcile_at() > now {
+            return;
+        }
+        let retire_after_check = self.watch_horizon_elapsed(&operation, now);
+        let invoice = match self
+            .rpc_call("get_invoice", self.inner.rpc.get_invoice(&hash_hex))
+            .await
+        {
+            Ok(invoice) => invoice,
+            Err(error) => {
                 if let Err(journal_error) = self.record_rpc_error(&operation, &error, now) {
-                    tracing::error!(error = %journal_error, "invalid invoice reconciliation error could not be recorded");
+                    tracing::error!(error = %journal_error, "invoice reconciliation error could not be recorded");
                 }
-                tracing::error!(error = %error, "reconciled invoice conflicts with durable intent");
+                tracing::warn!(error = %error, "polling invoice failed");
                 if retire_after_check {
                     self.unwatch(SettlementDirection::Incoming, &hash_hex);
                 }
-                continue;
+                return;
             }
-            let updated = match self.observe_by_hash(
-                SettlementDirection::Incoming,
-                &hash_hex,
-                Self::incoming_state(invoice.status),
-                None,
-                now,
-            ) {
-                Ok(Some(operation)) => operation,
-                Ok(None) => {
-                    tracing::error!("reconciled invoice is missing from the settlement journal");
-                    self.unwatch(SettlementDirection::Incoming, &hash_hex);
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(error = %error, "invoice observation could not be recorded");
-                    continue;
-                }
-            };
+        };
 
-            match invoice.status {
-                CkbInvoiceStatus::Paid => {
-                    if !self.reserve_notification(SettlementDirection::Incoming, &hash_hex) {
-                        continue;
-                    }
-                    let event = match self.received_event(&hash_hex, updated.principal_base()) {
-                        Ok(event) => event,
-                        Err(error) => {
-                            self.release_notification(SettlementDirection::Incoming, &hash_hex);
-                            tracing::error!(error = %error, "settled invoice could not be reported");
-                            continue;
-                        }
-                    };
-                    let queued = QueuedPaymentEvent {
-                        direction: SettlementDirection::Incoming,
-                        payment_hash: hash_hex.clone(),
-                        event,
-                    };
-                    if self.inner.events.send(queued).await.is_err() {
+        if let Err(error) = self.validate_invoice(
+            &hash_hex,
+            &invoice.invoice,
+            Some(operation.principal_base()),
+        ) {
+            if let Err(journal_error) = self.record_rpc_error(&operation, &error, now) {
+                tracing::error!(error = %journal_error, "invalid invoice reconciliation error could not be recorded");
+            }
+            tracing::error!(error = %error, "reconciled invoice conflicts with durable intent");
+            if retire_after_check {
+                self.unwatch(SettlementDirection::Incoming, &hash_hex);
+            }
+            return;
+        }
+        let updated = match self.observe_by_hash(
+            SettlementDirection::Incoming,
+            &hash_hex,
+            Self::incoming_state(invoice.status),
+            None,
+            now,
+        ) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => {
+                tracing::error!("reconciled invoice is missing from the settlement journal");
+                self.unwatch(SettlementDirection::Incoming, &hash_hex);
+                return;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "invoice observation could not be recorded");
+                return;
+            }
+        };
+
+        match invoice.status {
+            CkbInvoiceStatus::Paid => {
+                if !self.reserve_notification(SettlementDirection::Incoming, &hash_hex) {
+                    return;
+                }
+                let event = match self.received_event(&hash_hex, updated.principal_base()) {
+                    Ok(event) => event,
+                    Err(error) => {
                         self.release_notification(SettlementDirection::Incoming, &hash_hex);
-                        tracing::debug!("payment event stream closed; stopping sweep");
+                        tracing::error!(error = %error, "settled invoice could not be reported");
                         return;
                     }
-                }
-                CkbInvoiceStatus::Cancelled | CkbInvoiceStatus::Expired => {
+                };
+                self.queue_payment_event(QueuedPaymentEvent {
+                    direction: SettlementDirection::Incoming,
+                    payment_hash: hash_hex,
+                    event,
+                });
+            }
+            CkbInvoiceStatus::Cancelled | CkbInvoiceStatus::Expired => {
+                self.unwatch(SettlementDirection::Incoming, &hash_hex);
+            }
+            CkbInvoiceStatus::Open | CkbInvoiceStatus::Received => {
+                if retire_after_check {
                     self.unwatch(SettlementDirection::Incoming, &hash_hex);
-                }
-                // `Open` is still payable. `Received` means a TLC arrived but has not settled,
-                // so the mint does not hold the funds and must not credit the wallet.
-                CkbInvoiceStatus::Open | CkbInvoiceStatus::Received => {
-                    if retire_after_check {
-                        self.unwatch(SettlementDirection::Incoming, &hash_hex);
-                    }
                 }
             }
         }
     }
 
-    async fn sweep_outgoing_payments(&self) {
-        for hash_hex in self.watched(SettlementDirection::Outgoing) {
-            let operation = match self
-                .inner
-                .journal
-                .by_payment_hash(SettlementDirection::Outgoing, &hash_hex)
-            {
-                Ok(Some(operation)) => operation,
-                Ok(None) => {
-                    tracing::error!(
-                        "watched outgoing payment is missing from the settlement journal"
-                    );
-                    self.unwatch(SettlementDirection::Outgoing, &hash_hex);
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(error = %error, "settlement journal could not be read");
-                    continue;
-                }
-            };
-            if operation.event_state() != EventState::Pending
-                || operation.terminal_at().is_some()
-                || operation.dispatch_count() == 0
-            {
+    async fn reconcile_outgoing_payment(&self, hash_hex: String) {
+        let operation = match self
+            .inner
+            .journal
+            .by_payment_hash(SettlementDirection::Outgoing, &hash_hex)
+        {
+            Ok(Some(operation)) => operation,
+            Ok(None) => {
+                tracing::error!("watched outgoing payment is missing from the settlement journal");
                 self.unwatch(SettlementDirection::Outgoing, &hash_hex);
-                continue;
-            }
-            let now = Self::now_unix();
-            if operation.next_reconcile_at() > now {
-                continue;
-            }
-
-            let result = match self.inner.rpc.get_payment(&hash_hex).await {
-                Ok(result) => result,
-                Err(error) => {
-                    if let Err(journal_error) = self.record_rpc_error(&operation, &error, now) {
-                        tracing::error!(error = %journal_error, "outgoing reconciliation error could not be recorded");
-                    }
-                    tracing::warn!(error = %error, "polling outgoing payment failed");
-                    continue;
-                }
-            };
-
-            let Some(result) = result else {
-                if operation
-                    .observed_state()
-                    .can_transition_to(ObservedState::OutgoingUnknown)
-                {
-                    if let Err(error) =
-                        self.observe(&operation, ObservedState::OutgoingUnknown, None, now)
-                    {
-                        tracing::error!(error = %error, "missing outgoing session could not be recorded");
-                    }
-                } else if let Err(error) = self.inner.journal.record_reconciliation_error(
-                    SettlementDirection::Outgoing,
-                    operation.quote_id(),
-                    operation.revision(),
-                    ReconciliationErrorClass::InvalidResponse,
-                    now,
-                    self.next_reconcile_at(now),
-                ) {
-                    tracing::error!(error = %error, "missing outgoing session could not be recorded");
-                }
-                continue;
-            };
-
-            if let Err(error) = self.validate_payment_result(&hash_hex, &result) {
-                if let Err(journal_error) = self.record_rpc_error(&operation, &error, now) {
-                    tracing::error!(error = %journal_error, "invalid outgoing response could not be recorded");
-                }
-                tracing::error!(error = %error, "reconciled payment conflicts with durable intent");
-                continue;
-            }
-            let updated = match self.observe_by_hash(
-                SettlementDirection::Outgoing,
-                &hash_hex,
-                Self::outgoing_state(result.status),
-                (result.status == PaymentStatus::Success).then_some(result.fee),
-                now,
-            ) {
-                Ok(Some(operation)) => operation,
-                Ok(None) => {
-                    tracing::error!(
-                        "reconciled outgoing payment is missing from the settlement journal"
-                    );
-                    self.unwatch(SettlementDirection::Outgoing, &hash_hex);
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(error = %error, "outgoing observation could not be recorded");
-                    continue;
-                }
-            };
-
-            if !matches!(
-                result.status,
-                PaymentStatus::Success | PaymentStatus::Failed
-            ) {
-                continue;
-            }
-            if updated.event_state() != EventState::Pending {
-                self.unwatch(SettlementDirection::Outgoing, &hash_hex);
-                continue;
-            }
-            if !self.reserve_notification(SettlementDirection::Outgoing, &hash_hex) {
-                continue;
-            }
-            let event = match self.outgoing_event(&updated, &result) {
-                Ok(event) => event,
-                Err(error) => {
-                    self.release_notification(SettlementDirection::Outgoing, &hash_hex);
-                    tracing::error!(error = %error, "settled outgoing payment could not be reported");
-                    continue;
-                }
-            };
-            let queued = QueuedPaymentEvent {
-                direction: SettlementDirection::Outgoing,
-                payment_hash: hash_hex.clone(),
-                event,
-            };
-            if self.inner.events.send(queued).await.is_err() {
-                self.release_notification(SettlementDirection::Outgoing, &hash_hex);
-                tracing::debug!("payment event stream closed; stopping sweep");
                 return;
             }
+            Err(error) => {
+                tracing::error!(error = %error, "settlement journal could not be read");
+                return;
+            }
+        };
+        if operation.event_state() != EventState::Pending
+            || operation.terminal_at().is_some()
+            || operation.dispatch_count() == 0
+        {
+            self.unwatch(SettlementDirection::Outgoing, &hash_hex);
+            return;
         }
+        let now = Self::now_unix();
+        if operation.next_reconcile_at() > now {
+            return;
+        }
+
+        let result = match self
+            .rpc_call("get_payment", self.inner.rpc.get_payment(&hash_hex))
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if let Err(journal_error) = self.record_rpc_error(&operation, &error, now) {
+                    tracing::error!(error = %journal_error, "outgoing reconciliation error could not be recorded");
+                }
+                tracing::warn!(error = %error, "polling outgoing payment failed");
+                return;
+            }
+        };
+
+        let Some(result) = result else {
+            if operation
+                .observed_state()
+                .can_transition_to(ObservedState::OutgoingUnknown)
+            {
+                if let Err(error) =
+                    self.observe(&operation, ObservedState::OutgoingUnknown, None, now)
+                {
+                    tracing::error!(error = %error, "missing outgoing session could not be recorded");
+                }
+            } else {
+                let error = Error::Decode(
+                    "get_payment returned no session for a dispatched payment".to_string(),
+                );
+                if let Err(journal_error) = self.record_rpc_error(&operation, &error, now) {
+                    tracing::error!(error = %journal_error, "missing outgoing session could not be recorded");
+                }
+            }
+            return;
+        };
+
+        if let Err(error) = self.validate_payment_result(&hash_hex, &result) {
+            if let Err(journal_error) = self.record_rpc_error(&operation, &error, now) {
+                tracing::error!(error = %journal_error, "invalid outgoing response could not be recorded");
+            }
+            tracing::error!(error = %error, "reconciled payment conflicts with durable intent");
+            return;
+        }
+        let updated = match self.observe_by_hash(
+            SettlementDirection::Outgoing,
+            &hash_hex,
+            Self::outgoing_state(result.status),
+            (result.status == PaymentStatus::Success).then_some(result.fee),
+            now,
+        ) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => {
+                tracing::error!(
+                    "reconciled outgoing payment is missing from the settlement journal"
+                );
+                self.unwatch(SettlementDirection::Outgoing, &hash_hex);
+                return;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "outgoing observation could not be recorded");
+                return;
+            }
+        };
+
+        if !matches!(
+            result.status,
+            PaymentStatus::Success | PaymentStatus::Failed
+        ) {
+            return;
+        }
+        if updated.event_state() != EventState::Pending {
+            self.unwatch(SettlementDirection::Outgoing, &hash_hex);
+            return;
+        }
+        if !self.reserve_notification(SettlementDirection::Outgoing, &hash_hex) {
+            return;
+        }
+        let event = match self.outgoing_event(&updated, &result) {
+            Ok(event) => event,
+            Err(error) => {
+                self.release_notification(SettlementDirection::Outgoing, &hash_hex);
+                tracing::error!(error = %error, "settled outgoing payment could not be reported");
+                return;
+            }
+        };
+        self.queue_payment_event(QueuedPaymentEvent {
+            direction: SettlementDirection::Outgoing,
+            payment_hash: hash_hex,
+            event,
+        });
     }
 
     fn outgoing_event(
@@ -936,6 +1118,57 @@ impl FiberBackend {
     }
 }
 
+fn validate_config(config: &FiberConfig) -> Result<(), Error> {
+    let positive_durations = [
+        ("poll_interval", config.poll_interval),
+        ("rpc_connect_timeout", config.rpc_connect_timeout),
+        ("rpc_request_timeout", config.rpc_request_timeout),
+        (
+            "reconciliation_max_backoff",
+            config.reconciliation_max_backoff,
+        ),
+        ("payment_timeout", config.payment_timeout),
+    ];
+    if let Some((field, _)) = positive_durations
+        .into_iter()
+        .find(|(_, duration)| duration.is_zero())
+    {
+        return Err(Error::InvalidConfiguration {
+            field,
+            reason: "must be greater than zero",
+        });
+    }
+    if config.reconciliation_max_backoff < config.poll_interval {
+        return Err(Error::InvalidConfiguration {
+            field: "reconciliation_max_backoff",
+            reason: "must be at least the poll interval",
+        });
+    }
+    if config.reconciliation_concurrency == 0 {
+        return Err(Error::InvalidConfiguration {
+            field: "reconciliation_concurrency",
+            reason: "must be greater than zero",
+        });
+    }
+    if config.unit_scale == 0 {
+        return Err(Error::InvalidConfiguration {
+            field: "unit_scale",
+            reason: "must be greater than zero",
+        });
+    }
+    Ok(())
+}
+
+fn reconciliation_jitter(payment_hash: &str, reconciliation_count: u64) -> u64 {
+    let mut value = reconciliation_count ^ 0x9e37_79b9_7f4a_7c15;
+    for byte in payment_hash.bytes() {
+        value ^= u64::from(byte);
+        value = value.wrapping_mul(0x0000_0100_0000_01b3);
+        value ^= value >> 29;
+    }
+    value
+}
+
 fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, state: &str) -> MutexGuard<'a, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
         tracing::error!(
@@ -987,8 +1220,7 @@ impl MintPayment for FiberBackend {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = ticker.tick() => {
-                        backend.sweep_invoices().await;
-                        backend.sweep_outgoing_payments().await;
+                        backend.sweep_reconciliation().await;
                     },
                 }
             }
@@ -1074,15 +1306,16 @@ impl MintPayment for FiberBackend {
         }
 
         let created = self
-            .inner
-            .rpc
-            .new_invoice(NewInvoiceParams {
-                amount,
-                description: opts.description,
-                currency: config.currency,
-                expiry: Some(relative_expiry),
-                udt_type_script: config.udt_type_script.clone(),
-            })
+            .rpc_call(
+                "new_invoice",
+                self.inner.rpc.new_invoice(NewInvoiceParams {
+                    amount,
+                    description: opts.description,
+                    currency: config.currency,
+                    expiry: Some(relative_expiry),
+                    udt_type_script: config.udt_type_script.clone(),
+                }),
+            )
             .await
             .inspect_err(|e| tracing::error!(error = %e, "new_invoice failed"))?;
 
@@ -1117,7 +1350,10 @@ impl MintPayment for FiberBackend {
             .inner
             .journal
             .by_payment_hash(SettlementDirection::Incoming, &hash_hex)?;
-        let invoice = match self.inner.rpc.get_invoice(&hash_hex).await {
+        let invoice = match self
+            .rpc_call("get_invoice", self.inner.rpc.get_invoice(&hash_hex))
+            .await
+        {
             Ok(invoice) => invoice,
             Err(error) => {
                 if let Some(operation) = durable.as_ref() {
@@ -1220,14 +1456,15 @@ impl MintPayment for FiberBackend {
         // A dry run builds a real route and returns the fee it would pay, without dispatching a
         // TLC. If no route exists the node errors here, and the mint rejects the melt quote.
         let probe = self
-            .inner
-            .rpc
-            .send_payment(SendPaymentParams {
-                invoice: opts.request.clone(),
-                max_fee_amount: None,
-                max_fee_rate: None,
-                dry_run: Some(true),
-            })
+            .rpc_call(
+                "send_payment",
+                self.inner.rpc.send_payment(SendPaymentParams {
+                    invoice: opts.request.clone(),
+                    max_fee_amount: None,
+                    max_fee_rate: None,
+                    dry_run: Some(true),
+                }),
+            )
             .await
             .inspect_err(|e| tracing::warn!(error = %e, "melt quote route probe failed"))?;
         self.validate_payment_result(&hash_hex, &probe)?;
@@ -1269,6 +1506,17 @@ impl MintPayment for FiberBackend {
         self.ensure_unit(unit)?;
         let opts = custom_outgoing(options)?;
         let config = &self.inner.config;
+        let timeout = opts
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(config.payment_timeout);
+        if timeout.is_zero() {
+            return Err(Error::InvalidConfiguration {
+                field: "payment_timeout",
+                reason: "must be greater than zero",
+            }
+            .into());
+        }
 
         let (hash, hash_hex, amount_base) = self.resolve_invoice(&opts.request).await?;
         let max_fee_amount = opts
@@ -1304,7 +1552,10 @@ impl MintPayment for FiberBackend {
         // A durable hash identifies the one Fiber attempt. Any existing node session, including a
         // terminal failure, is reported rather than automatically creating another economic side
         // effect for a duplicated CDK call.
-        match self.inner.rpc.get_payment(&hash_hex).await {
+        match self
+            .rpc_call("get_payment", self.inner.rpc.get_payment(&hash_hex))
+            .await
+        {
             Ok(Some(existing)) => {
                 self.validate_payment_result(&hash_hex, &existing)?;
                 let now = Self::now_unix();
@@ -1362,11 +1613,8 @@ impl MintPayment for FiberBackend {
 
         let now = Self::now_unix();
         operation = self.observe(&operation, ObservedState::OutgoingUnknown, None, now)?;
-        let timeout = opts
-            .timeout_secs
-            .map(Duration::from_secs)
-            .unwrap_or(config.payment_timeout);
         let deadline = now.saturating_add(timeout.as_secs());
+        let operation_deadline = tokio::time::Instant::now() + timeout;
         operation = self.inner.journal.prepare_outgoing_dispatch(
             &quote_id,
             operation.revision(),
@@ -1380,15 +1628,18 @@ impl MintPayment for FiberBackend {
         let max_fee_rate =
             max_fee_amount.and_then(|fee| amount::max_fee_rate_for(amount_base, fee));
 
+        let remaining = operation_deadline.saturating_duration_since(tokio::time::Instant::now());
         let dispatched = match self
-            .inner
-            .rpc
-            .send_payment(SendPaymentParams {
-                invoice: opts.request.clone(),
-                max_fee_amount,
-                max_fee_rate,
-                dry_run: Some(false),
-            })
+            .rpc_call_with_timeout(
+                "send_payment",
+                config.rpc_request_timeout.min(remaining),
+                self.inner.rpc.send_payment(SendPaymentParams {
+                    invoice: opts.request.clone(),
+                    max_fee_amount,
+                    max_fee_rate,
+                    dry_run: Some(false),
+                }),
+            )
             .await
         {
             Ok(result) => result,
@@ -1408,7 +1659,7 @@ impl MintPayment for FiberBackend {
             now,
         )?;
         let settled = self
-            .await_settlement(&hash_hex, dispatched, timeout)
+            .await_settlement(&hash_hex, dispatched, operation_deadline)
             .await?;
         operation = self.observe(
             &operation,
@@ -1432,7 +1683,10 @@ impl MintPayment for FiberBackend {
             .journal
             .by_payment_hash(SettlementDirection::Outgoing, &hash_hex)?;
 
-        let node_result = match self.inner.rpc.get_payment(&hash_hex).await {
+        let node_result = match self
+            .rpc_call("get_payment", self.inner.rpc.get_payment(&hash_hex))
+            .await
+        {
             Ok(result) => result,
             Err(error) => {
                 if let Some(operation) = durable.as_ref() {
@@ -1487,15 +1741,11 @@ impl MintPayment for FiberBackend {
                             self.watch_operation(&updated);
                         }
                     } else if operation.terminal_at().is_none() {
-                        let updated = self.inner.journal.record_reconciliation_error(
-                            SettlementDirection::Outgoing,
-                            operation.quote_id(),
-                            operation.revision(),
-                            ReconciliationErrorClass::InvalidResponse,
-                            Self::now_unix(),
-                            self.next_reconcile_at(Self::now_unix()),
-                        )?;
-                        self.watch_operation(&updated);
+                        let error = Error::Decode(
+                            "get_payment returned no session for a dispatched payment".to_string(),
+                        );
+                        self.record_rpc_error(operation, &error, Self::now_unix())?;
+                        self.watch_operation(operation);
                     }
                 }
                 Ok(MakePaymentResponse {
