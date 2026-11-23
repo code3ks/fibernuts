@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::wire::{self, Currency, Script};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const RECORD_VERSION: u32 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -89,7 +89,7 @@ pub enum JournalError {
 }
 
 /// Whether value is entering or leaving the mint over Fiber.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettlementDirection {
     /// A Fiber invoice whose settlement may make a mint quote eligible for issuance.
     Incoming,
@@ -327,7 +327,7 @@ impl ObservedState {
 /// Progress of the deduplicated terminal notification associated with an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventState {
-    /// This operation type does not currently emit an event.
+    /// The operation has not crossed an event-producing boundary.
     NotApplicable,
     /// A terminal event still needs delivery or acknowledgement.
     Pending,
@@ -862,20 +862,22 @@ impl SettlementJournal {
         }
 
         let deadline = current.deadline_unix.unwrap_or(deadline_unix);
+        let event_state = EventState::Pending;
         let terminal_at = terminal_at(
             SettlementDirection::Outgoing,
             ObservedState::OutgoingDispatchPrepared,
-            current.event_state,
+            event_state,
             now_unix,
         );
         let changed = transaction.execute(
             "UPDATE settlement_operations SET
-                observed_state = ?1, deadline_unix = ?2,
+                observed_state = ?1, event_state = ?2, deadline_unix = ?3,
                 dispatch_count = dispatch_count + 1, revision = revision + 1,
-                updated_at = ?3, terminal_at = ?4
-             WHERE direction = 'outgoing' AND quote_id = ?5 AND revision = ?6",
+                updated_at = ?4, terminal_at = ?5
+             WHERE direction = 'outgoing' AND quote_id = ?6 AND revision = ?7",
             params![
                 ObservedState::OutgoingDispatchPrepared.as_str(),
+                event_state.as_str(),
                 to_i64(deadline, "deadline_unix")?,
                 to_i64(now_unix, "updated_at")?,
                 terminal_at.map(|v| to_i64(v, "terminal_at")).transpose()?,
@@ -1030,7 +1032,7 @@ impl SettlementJournal {
         Ok(updated)
     }
 
-    /// Durably deduplicate delivery of an incoming terminal event.
+    /// Durably deduplicate delivery of a terminal settlement event.
     pub fn mark_event_delivered(
         &self,
         direction: SettlementDirection,
@@ -1043,10 +1045,14 @@ impl SettlementJournal {
         let current =
             query_by_quote(&transaction, direction, quote_id)?.ok_or(JournalError::Conflict)?;
         require_revision(&current, expected_revision)?;
-        if current.event_state != EventState::Pending
-            || (direction == SettlementDirection::Incoming
-                && current.observed_state != ObservedState::IncomingPaid)
-        {
+        let terminal_state = match direction {
+            SettlementDirection::Incoming => current.observed_state == ObservedState::IncomingPaid,
+            SettlementDirection::Outgoing => matches!(
+                current.observed_state,
+                ObservedState::OutgoingSucceeded | ObservedState::OutgoingFailed
+            ),
+        };
+        if current.event_state != EventState::Pending || !terminal_state {
             return Err(JournalError::InvalidTransition);
         }
 
@@ -1128,12 +1134,14 @@ impl SettlementJournal {
         }
         let source_connection =
             Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        validate_database(&source_connection)?;
+        validate_restore_source(&source_connection)?;
 
         let temporary = reserve_temporary(destination)?;
         let result = (|| {
             source_connection.backup(MAIN_DB, &temporary, None)?;
-            let restored = Connection::open(&temporary)?;
+            let mut restored = Connection::open(&temporary)?;
+            configure_connection(&restored)?;
+            migrate(&mut restored)?;
             validate_database(&restored)?;
             drop(restored);
             publish_without_overwrite(&temporary, destination)?;
@@ -1168,6 +1176,7 @@ fn migrate(connection: &mut Connection) -> Result<(), JournalError> {
     })?;
     match version {
         0 => migrate_from_empty(connection),
+        1 => migrate_v1_to_v2(connection),
         SCHEMA_VERSION => Ok(()),
         found => Err(JournalError::IncompatibleSchema {
             found,
@@ -1242,9 +1251,47 @@ fn migrate_from_empty(connection: &mut Connection) -> Result<(), JournalError> {
 
         CREATE INDEX settlement_recovery_order
             ON settlement_operations (terminal_at, next_reconcile_at, created_at);
-        PRAGMA user_version = 1;",
+        PRAGMA user_version = 2;",
     )?;
     transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), JournalError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "UPDATE settlement_operations
+         SET event_state = 'pending'
+         WHERE direction = 'outgoing'
+           AND dispatch_count > 0
+           AND terminal_at IS NULL
+           AND event_state = 'not_applicable'",
+        [],
+    )?;
+    transaction.pragma_update(None, "user_version", 2)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn validate_restore_source(connection: &Connection) -> Result<(), JournalError> {
+    let raw_version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let version = u32::try_from(raw_version).map_err(|_| JournalError::IncompatibleSchema {
+        found: u32::MAX,
+        supported: SCHEMA_VERSION,
+    })?;
+    if !(1..=SCHEMA_VERSION).contains(&version) {
+        return Err(JournalError::IncompatibleSchema {
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(JournalError::CorruptRecord { field: "database" });
+    }
+    connection.prepare("SELECT singleton, mint_url, unit FROM journal_scope LIMIT 0")?;
+    let sql = format!("SELECT {RECORD_COLUMNS} FROM settlement_operations LIMIT 0");
+    connection.prepare(&sql)?;
     Ok(())
 }
 
@@ -1396,10 +1443,21 @@ fn validate_record(record: &SettlementOperation, decoded: bool) -> Result<(), Jo
     {
         return Err(invalid("event_state"));
     }
-    if record.direction == SettlementDirection::Outgoing
-        && record.event_state != EventState::NotApplicable
-    {
-        return Err(invalid("event_state"));
+    if record.direction == SettlementDirection::Outgoing {
+        let terminal_state = matches!(
+            record.observed_state,
+            ObservedState::OutgoingSucceeded | ObservedState::OutgoingFailed
+        );
+        let valid_event_state = match record.event_state {
+            EventState::NotApplicable => {
+                record.dispatch_count == 0 || (terminal_state && record.terminal_at.is_some())
+            }
+            EventState::Pending => record.dispatch_count > 0,
+            EventState::Delivered => record.dispatch_count > 0 && terminal_state,
+        };
+        if !valid_event_state {
+            return Err(invalid("event_state"));
+        }
     }
     if record.direction == SettlementDirection::Incoming && record.fee_ceiling_base.is_some() {
         return Err(invalid("fee_ceiling_base"));
@@ -1442,9 +1500,14 @@ fn validate_record(record: &SettlementOperation, decoded: bool) -> Result<(), Jo
     {
         return Err(invalid("actual_fee_base"));
     }
-    if record.event_state == EventState::Delivered
-        && record.observed_state != ObservedState::IncomingPaid
-    {
+    let delivered_state_is_valid = match record.direction {
+        SettlementDirection::Incoming => record.observed_state == ObservedState::IncomingPaid,
+        SettlementDirection::Outgoing => matches!(
+            record.observed_state,
+            ObservedState::OutgoingSucceeded | ObservedState::OutgoingFailed
+        ),
+    };
+    if record.event_state == EventState::Delivered && !delivered_state_is_valid {
         return Err(invalid("event_state"));
     }
     if record.updated_at < record.created_at
@@ -1795,7 +1858,10 @@ fn is_terminal(
             matches!(
                 state,
                 ObservedState::OutgoingSucceeded | ObservedState::OutgoingFailed
-            ) && event_state == EventState::NotApplicable
+            ) && matches!(
+                event_state,
+                EventState::NotApplicable | EventState::Delivered
+            )
         }
     }
 }

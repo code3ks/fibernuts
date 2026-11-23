@@ -78,6 +78,8 @@ needs:
 - **Backups** of the mint database (it records which quotes were paid and which proofs were spent).
 - **Backups** of the processor settlement journal (it records stable quote/payment correlation and
   every nonterminal recovery intent). It is required alongside, not instead of, the mint database.
+  Journal schema upgrades are automatic and transactional; back up the stopped processor volume
+  before deploying a version that changes the schema.
 - **Monitoring** of channel balances and the processor↔node link.
 
 None of that changes `cdk-fiber`; it's the ordinary cost of running a payment service.

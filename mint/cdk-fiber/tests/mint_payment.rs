@@ -322,6 +322,24 @@ async fn wait_for_incoming_state(
     panic!("incoming operation did not reach {observed_state:?}/{event_state:?}");
 }
 
+async fn wait_for_outgoing_state(
+    journal: &SettlementJournal,
+    observed_state: ObservedState,
+    event_state: EventState,
+) {
+    for _ in 0..400 {
+        let operation = journal
+            .by_payment_hash(SettlementDirection::Outgoing, HASH_HEX)
+            .unwrap()
+            .unwrap();
+        if operation.observed_state() == observed_state && operation.event_state() == event_state {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("outgoing operation did not reach {observed_state:?}/{event_state:?}");
+}
+
 #[tokio::test]
 async fn settings_advertise_the_fiber_method_and_the_configured_unit() {
     // cdk-mintd registers methods from the `custom` keys and requires `unit` to match its
@@ -866,6 +884,258 @@ async fn a_lost_dispatch_response_is_not_resent_after_restart() {
         .unwrap();
     assert_eq!(durable.dispatch_count(), 1);
     assert_eq!(durable.observed_state(), ObservedState::OutgoingUnknown);
+}
+
+#[tokio::test]
+async fn delayed_outgoing_success_is_announced_once_after_restart_with_actual_fee() {
+    use futures::StreamExt;
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let quote_id = QuoteId::new();
+    let fee = 2 * SCALE as u128;
+
+    let first_node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![None]),
+        send_payment: Some(payment(PaymentStatus::Inflight, 0)),
+        ..Script::default()
+    });
+    {
+        let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+        let (backend, first_node) = backend_with_journal(first_node, journal);
+        let pending = backend
+            .make_payment(&rusd(), outgoing_with_quote(Some(10), quote_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(pending.status, MeltQuoteState::Pending);
+        assert_eq!(first_node.recorded.lock().await.sends.len(), 1);
+    }
+
+    let restarted_node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![Some(payment_with_preimage(
+            PaymentStatus::Success,
+            fee,
+        ))]),
+        ..Script::default()
+    });
+    let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (backend, restarted_node) = backend_with_journal(restarted_node, journal.clone());
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the restored outgoing payment must settle")
+        .expect("stream must yield");
+    match event {
+        cdk_common::payment::Event::PaymentSuccessful {
+            quote_id: reported_quote,
+            details,
+        } => {
+            assert_eq!(reported_quote, quote_id);
+            assert_eq!(details.status, MeltQuoteState::Paid);
+            assert_eq!(details.total_spent.value(), AMOUNT_ECASH + 2);
+            assert_eq!(
+                details.payment_proof,
+                Some(format!("0x{}", "42".repeat(32)))
+            );
+        }
+        other => panic!("expected PaymentSuccessful, got {other:?}"),
+    }
+    assert!(restarted_node.recorded.lock().await.sends.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), stream.next())
+            .await
+            .is_err(),
+        "a terminal observation must not emit twice"
+    );
+
+    let operation = journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.observed_state(), ObservedState::OutgoingSucceeded);
+    assert_eq!(operation.actual_fee_base(), Some(fee));
+    assert_eq!(operation.event_state(), EventState::Delivered);
+    assert!(operation.terminal_at().is_some());
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delayed_outgoing_failure_is_announced_once_after_restart() {
+    use futures::StreamExt;
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let quote_id = QuoteId::new();
+
+    let first_node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![None]),
+        send_payment: Some(payment(PaymentStatus::Created, 0)),
+        ..Script::default()
+    });
+    {
+        let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+        let (backend, _) = backend_with_journal(first_node, journal);
+        let pending = backend
+            .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(pending.status, MeltQuoteState::Pending);
+    }
+
+    let restarted_node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![Some(payment(PaymentStatus::Failed, 0))]),
+        ..Script::default()
+    });
+    let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (backend, restarted_node) = backend_with_journal(restarted_node, journal.clone());
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the restored outgoing payment must fail authoritatively")
+        .expect("stream must yield");
+    match event {
+        cdk_common::payment::Event::PaymentFailed {
+            quote_id: reported_quote,
+            reason,
+        } => {
+            assert_eq!(reported_quote, quote_id);
+            assert!(reason.contains("authoritative terminal payment failure"));
+        }
+        other => panic!("expected PaymentFailed, got {other:?}"),
+    }
+    assert!(restarted_node.recorded.lock().await.sends.is_empty());
+
+    let operation = journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.observed_state(), ObservedState::OutgoingFailed);
+    assert_eq!(operation.event_state(), EventState::Delivered);
+    assert!(operation.terminal_at().is_some());
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_outgoing_notification_queued_before_restart_is_handed_off_once() {
+    use futures::StreamExt;
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("settlement.sqlite3");
+    let quote_id = QuoteId::new();
+    let node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![None]),
+        send_payment: Some(payment(PaymentStatus::Inflight, 0)),
+        ..Script::default()
+    });
+    {
+        let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+        let (backend, node) = backend_with_journal(node.clone(), journal.clone());
+        let pending = backend
+            .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(pending.status, MeltQuoteState::Pending);
+        node.script.lock().await.get_payment =
+            VecDeque::from(vec![Some(payment_with_preimage(PaymentStatus::Success, 0))]);
+
+        let stream = backend.wait_payment_event().await.unwrap();
+        backend.start().await.unwrap();
+        wait_for_outgoing_state(
+            &journal,
+            ObservedState::OutgoingSucceeded,
+            EventState::Pending,
+        )
+        .await;
+        backend.stop().await.unwrap();
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let restarted_node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![Some(payment_with_preimage(PaymentStatus::Success, 0))]),
+        ..Script::default()
+    });
+    let journal = Arc::new(SettlementJournal::open(&path).unwrap());
+    let (backend, restarted_node) = backend_with_journal(restarted_node, journal.clone());
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the durable outgoing notification must be restored")
+        .expect("stream must yield");
+    assert!(matches!(
+        event,
+        cdk_common::payment::Event::PaymentSuccessful {
+            quote_id: reported_quote,
+            ..
+        } if reported_quote == quote_id
+    ));
+    assert!(restarted_node.recorded.lock().await.sends.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), stream.next())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        journal
+            .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+            .unwrap()
+            .unwrap()
+            .event_state(),
+        EventState::Delivered
+    );
+    backend.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_terminal_checks_claim_one_outgoing_delivery_without_redispatch() {
+    use futures::StreamExt;
+
+    let quote_id = QuoteId::new();
+    let journal = Arc::new(SettlementJournal::in_memory().unwrap());
+    let node = MockNode::new(Script {
+        get_payment: VecDeque::from(vec![None]),
+        send_payment: Some(payment(PaymentStatus::Inflight, 0)),
+        ..Script::default()
+    });
+    let (backend, node) = backend_with_journal(node, journal.clone());
+    let pending = backend
+        .make_payment(&rusd(), outgoing_with_quote(None, quote_id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(pending.status, MeltQuoteState::Pending);
+    node.script.lock().await.get_payment =
+        VecDeque::from(vec![Some(payment_with_preimage(PaymentStatus::Success, 0))]);
+
+    let first_id = hash_id();
+    let second_id = hash_id();
+    let (first, second) = tokio::join!(
+        backend.check_outgoing_payment(&first_id),
+        backend.check_outgoing_payment(&second_id)
+    );
+    assert_eq!(first.unwrap().status, MeltQuoteState::Paid);
+    assert_eq!(second.unwrap().status, MeltQuoteState::Paid);
+    assert_eq!(node.recorded.lock().await.sends.len(), 1);
+
+    let mut stream = backend.wait_payment_event().await.unwrap();
+    backend.start().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), stream.next())
+            .await
+            .is_err(),
+        "a pull reconciliation that claimed delivery must suppress a replayed event"
+    );
+    let operation = journal
+        .by_quote_id(SettlementDirection::Outgoing, &quote_id.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.event_state(), EventState::Delivered);
+    backend.stop().await.unwrap();
 }
 
 #[tokio::test]

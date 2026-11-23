@@ -109,7 +109,7 @@ Failure cases and required behavior:
 
 ## Outgoing cash-out settlement
 
-The target journal persists intent before dispatch and binds:
+The journal persists intent before dispatch and binds:
 
 - CDK melt quote ID and quote state;
 - Fiber payment hash and original invoice;
@@ -268,9 +268,9 @@ failure, timeout, retry, and panic/error formatting paths.
 | Control | Current baseline | Required before completion |
 |---|---|---|
 | Only `Paid` authorizes incoming settlement | Tested | Preserve through stable upgrade and restart journal |
-| Timeout/unknown never becomes failed cash-out | Tested | Add durable reconciliation and delayed-terminal event recovery |
+| Timeout/unknown never becomes failed cash-out | Durable restart reconciliation and delayed terminal events tested | Add broader timeout and malformed-response fault injection |
 | Exact network and UDT validation | Tested | Re-verify on stable Fiber and mainnet preflight |
-| Incoming/outgoing operation journal | Durable scoped schema plus restored, bounded incoming reconciliation and deduplicated notification handoff | Add outgoing delayed-terminal reconciliation and broader fault injection |
+| Incoming/outgoing operation journal | Durable scoped schema plus restored incoming and outgoing reconciliation with deduplicated notification handoff | Add broader fault injection and bounded concurrent scheduling |
 | Outgoing token redisplay/reclaim | Implemented in reference browser flows | Reload, multi-tab, mint-refusal, and safe-reclaim coverage |
 | Hosted tenant and remote signer | Not shipped | Pinned upstream adapter plus public-testnet security gate |
 | Browser wallet funding | Not shipped | JoyID/CCC witness-only external funding with interruption tests |

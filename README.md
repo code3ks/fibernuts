@@ -175,6 +175,9 @@ A mint that mishandles an ambiguous payment loses money. Five rules, each a name
   wallet proofs can be reserved.
 
 Rounding follows the same principle: funds **received** round down, amounts **charged** round up.
+If a melt remains pending after the request ends, the durable payment hash is reconciled after
+restart. Terminal success or failure is reported once with the original quote ID; successful
+accounting uses the original principal plus Fiber's authoritative actual fee.
 
 Invoices are **standard**, never hold invoices. Omitting both `payment_preimage` and `payment_hash`
 is what makes the node generate a preimage and auto-settle; supplying only a hash would create a
@@ -237,7 +240,6 @@ against the exact pinned Fiber source and covered by encoding tests.
 
 - Fold `deploy/devnet.md` into a single `make demo` target.
 - Upstream `cdk-fiber` to `cashubtc/cdk` alongside `cdk-cln` and `cdk-lnd`.
-- Melt events on the payment stream, once a pending melt can be resolved without polling.
 - Multi-unit mints: one processor per unit today.
 
 ## License

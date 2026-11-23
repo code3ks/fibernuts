@@ -85,7 +85,12 @@ without linking a claim to later Cashu transfers.
 3. `cdk-fiber` calls `send_payment` with `dry_run: true`. The node builds a real route and returns
    the fee it *would* pay, without dispatching a TLC. No route ⇒ the quote is rejected.
 4. The quoted fee is that routed fee plus a cushion, rounded up, floored at a minimum.
-5. Wallet submits proofs. `cdk-fiber` dispatches the payment and polls to a terminal state.
+5. Wallet submits proofs. `cdk-fiber` durably records the quote, payment hash, principal, fee
+   ceiling, and dispatch boundary before sending one Fiber payment.
+6. If the request ends while Fiber still reports `Created` or `Inflight`, the result remains
+   `Pending`. Background reconciliation resumes from the same payment hash after restart and emits
+   one terminal event with the original quote ID. A delayed success charges the original principal
+   plus Fiber's authoritative actual routing fee.
 
 ### Failure states
 
@@ -148,14 +153,15 @@ closed. The journal excludes proofs, Cashu tokens, payment preimages, mnemonics,
 SQLite online backups are integrity-checked, restores refuse to overwrite an existing database, and
 retention never removes nonterminal operations.
 
-On startup the processor restores every nonterminal incoming record and performs authoritative
-Fiber reconciliation. A `PaymentReceived` stream notification is durably claimed before it is
-handed to the processor stream; repeated stream wakeups for the same payment hash are suppressed.
-The pinned CDK interface has no acknowledgement after its mint-database commit, so an interrupted
-push handoff is recovered through `check_incoming_payment_status`, whose repeated paid responses
-are idempotent in CDK by payment ID. Background polling stops after the invoice deadline plus the
-configured grace period, following one final reconciliation. The unresolved journal record remains
-durable for explicit status checks and is never relabeled failed merely because polling stopped.
+On startup the processor restores every nonterminal incoming invoice and every dispatched outgoing
+payment, then queries Fiber by the durable payment hash. Incoming `PaymentReceived` and outgoing
+terminal notifications are durably claimed before they are handed to the processor stream;
+repeated observations for the same operation are suppressed. The pinned CDK interface has no
+acknowledgement after its mint-database commit, so authoritative pull checks remain available after
+an interrupted push handoff. Background incoming polling stops after the invoice deadline plus the
+configured grace period, following one final reconciliation. Outgoing payments remain recoverable
+until Fiber reports success or terminal failure; a timeout or missing session never becomes a
+failure by elapsed time alone.
 
 `cdk-mintd` 0.18 stores its active configuration in the mint database. Import
 `deploy/mintd.config.toml` with `config init` for a new work directory, and use `config apply` for a
@@ -174,7 +180,9 @@ The suite encodes the invariants above as named tests — among them
 `a_different_udt_melt_invoice_is_rejected_before_route_probe`,
 `a_melt_that_never_settles_reports_pending_never_failed`,
 `an_outgoing_payment_the_node_never_saw_is_unknown_not_failed`,
-`an_in_flight_melt_is_never_dispatched_twice`, and
+`an_in_flight_melt_is_never_dispatched_twice`,
+`delayed_outgoing_success_is_announced_once_after_restart_with_actual_fee`,
+`delayed_outgoing_failure_is_announced_once_after_restart`, and
 `the_empty_method_delivered_by_the_grpc_bridge_is_accepted`.
 
 The wire encodings (`0x`-prefixed minimal-form hex and the deliberate omission of
