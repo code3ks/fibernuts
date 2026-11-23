@@ -139,6 +139,10 @@ unambiguous.
 | `FIBERNUTS_FEE_PERCENT` | `1` | cushion added to the node's routed fee |
 | `FIBERNUTS_MIN_FEE_RESERVE` | `1` | floor on the melt fee, in ecash units |
 | `FIBERNUTS_POLL_SECS` | `3` | invoice/payment poll interval |
+| `FIBERNUTS_RPC_CONNECT_TIMEOUT_SECS` | `3` | maximum HTTP connection-establishment time |
+| `FIBERNUTS_RPC_REQUEST_TIMEOUT_SECS` | `10` | maximum complete JSON-RPC request/response time |
+| `FIBERNUTS_RECONCILE_MAX_BACKOFF_SECS` | `60` | maximum jittered delay after repeated reconciliation errors |
+| `FIBERNUTS_RECONCILE_CONCURRENCY` | `8` | maximum settlement records reconciled concurrently |
 | `FIBERNUTS_INCOMING_WATCH_GRACE_SECS` | `86400` | background reconciliation after invoice expiry; durable pull recovery remains available afterward |
 | `FIBERNUTS_PAYMENT_TIMEOUT_SECS` | `60` | how long a melt waits before reporting `Pending` |
 
@@ -161,7 +165,15 @@ acknowledgement after its mint-database commit, so authoritative pull checks rem
 an interrupted push handoff. Background incoming polling stops after the invoice deadline plus the
 configured grace period, following one final reconciliation. Outgoing payments remain recoverable
 until Fiber reports success or terminal failure; a timeout or missing session never becomes a
-failure by elapsed time alone.
+failure by elapsed time alone. Reconciliation queries are globally concurrency-limited and each
+has its own request deadline, so one stalled node call cannot block every watch. Transport errors
+use durable bounded exponential backoff with deterministic jitter; a valid observation resets the
+backoff. The operation deadline caps the foreground melt wait but does not convert an unresolved
+payment into failure or authorize another dispatch.
+
+`FiberBackend::settlement_metrics` exposes aggregate-only counters for RPC latency, timeouts,
+transport and protocol failures, retries, in-flight reconciliation, and backlog. Trace events use
+the `cdk_fiber::metrics` target and contain no quote IDs, payment hashes, invoices, or bearer data.
 
 `cdk-mintd` 0.18 stores its active configuration in the mint database. Import
 `deploy/mintd.config.toml` with `config init` for a new work directory, and use `config apply` for a

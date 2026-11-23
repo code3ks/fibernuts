@@ -80,7 +80,10 @@ needs:
   every nonterminal recovery intent). It is required alongside, not instead of, the mint database.
   Journal schema upgrades are automatic and transactional; back up the stopped processor volume
   before deploying a version that changes the schema.
-- **Monitoring** of channel balances and the processor↔node link.
+- **Monitoring** of channel balances and the processor↔node link. The processor exposes
+  aggregate-only RPC latency, timeout, retry, in-flight reconciliation, and backlog counters; set
+  the `cdk_fiber::metrics` tracing target to `trace` to emit snapshots without operation IDs,
+  invoices, hashes, or bearer data.
 
 None of that changes `cdk-fiber`; it's the ordinary cost of running a payment service.
 

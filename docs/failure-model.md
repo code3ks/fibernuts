@@ -268,9 +268,9 @@ failure, timeout, retry, and panic/error formatting paths.
 | Control | Current baseline | Required before completion |
 |---|---|---|
 | Only `Paid` authorizes incoming settlement | Tested | Preserve through stable upgrade and restart journal |
-| Timeout/unknown never becomes failed cash-out | Durable restart reconciliation and delayed terminal events tested | Add broader timeout and malformed-response fault injection |
+| Timeout/unknown never becomes failed cash-out | Durable restart reconciliation, delayed terminal events, request deadlines, and timeout fault injection tested | Extend live failure evidence at each release pin |
 | Exact network and UDT validation | Tested | Re-verify on stable Fiber and mainnet preflight |
-| Incoming/outgoing operation journal | Durable scoped schema plus restored incoming and outgoing reconciliation with deduplicated notification handoff | Add broader fault injection and bounded concurrent scheduling |
+| Incoming/outgoing operation journal | Durable scoped schema, restored reconciliation, deduplicated notification handoff, bounded concurrent scheduling, and jittered backoff | Extend live failure evidence and operator health export |
 | Outgoing token redisplay/reclaim | Implemented in reference browser flows | Reload, multi-tab, mint-refusal, and safe-reclaim coverage |
 | Hosted tenant and remote signer | Not shipped | Pinned upstream adapter plus public-testnet security gate |
 | Browser wallet funding | Not shipped | JoyID/CCC witness-only external funding with interruption tests |

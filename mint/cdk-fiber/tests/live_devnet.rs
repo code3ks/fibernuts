@@ -67,7 +67,7 @@ fn currency() -> Currency {
 
 fn backend(rpc_url: &str) -> FiberBackend {
     FiberBackend::new(
-        Arc::new(HttpFiberRpc::new(rpc_url)),
+        Arc::new(HttpFiberRpc::new(rpc_url).expect("HTTP RPC client")),
         FiberConfig {
             unit: CurrencyUnit::Custom("rusd".into()),
             currency: currency(),
