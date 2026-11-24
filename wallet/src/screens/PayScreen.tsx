@@ -6,6 +6,8 @@ import { decodePaymentRequest, type DecodedPaymentRequest } from "../lib/payment
 import { fmt, type PreparedSend } from "../lib/wallet";
 import { QrScanner } from "../components/QrScanner";
 import { Button, FormTextarea, Notice, QrPanel, StatusBadge } from "../components/Primitives";
+import { SettlementFacts } from "../components/SettlementFacts";
+import type { SettlementContext } from "../domain/settlement-context";
 
 type PayView = "scan" | "checking" | "review" | "building" | "token";
 
@@ -21,6 +23,8 @@ export interface OutgoingPreparation {
 export function PayScreen({
   ticker,
   mintName,
+  mintUrl,
+  context,
   operations,
   onPreparePayment,
   onCreatePayment,
@@ -28,6 +32,8 @@ export function PayScreen({
 }: {
   ticker: string;
   mintName: string;
+  mintUrl: string;
+  context: SettlementContext;
   operations: WalletOperation[];
   onPreparePayment: (request: DecodedPaymentRequest) => Promise<OutgoingPreparation>;
   onCreatePayment: (request: DecodedPaymentRequest, preparation: OutgoingPreparation) => Promise<SendOperation>;
@@ -139,6 +145,7 @@ export function PayScreen({
               <dd className="mono">{fmt(preparation.balance - preparation.debit)} {ticker}</dd>
             </div>
           </dl>
+          <SettlementFacts context={context} mintUrl={mintUrl} unit={ticker} title="Payment settlement" />
         </section>
         <Notice tone="recoverable">
           The fee covers this wallet's split and the recipient's future settlement swap. The bearer token

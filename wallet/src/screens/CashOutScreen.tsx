@@ -1,10 +1,12 @@
 import { ArrowRight, CheckCircle2, Landmark, RefreshCw } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useRef, useState, type FormEvent } from "react";
 
 import { Button, FormTextarea, Notice, ProgressSteps, StatusBadge } from "../components/Primitives";
 import { QrScanner } from "../components/QrScanner";
 import type { CashOutOperation, WalletOperation } from "../domain/operations";
+import type { SettlementContext } from "../domain/settlement-context";
 import { explainMeltError, fmt, units, type MeltQuote, type PreparedMelt } from "../lib/wallet";
+import { SettlementFacts } from "../components/SettlementFacts";
 
 type CashOutView = "invoice" | "review" | "dispatching" | "status";
 
@@ -20,6 +22,8 @@ export function CashOutScreen({
   balance,
   ticker,
   mintName,
+  mintUrl,
+  context,
   online,
   operations,
   onQuote,
@@ -31,6 +35,8 @@ export function CashOutScreen({
   balance: number;
   ticker: string;
   mintName: string;
+  mintUrl: string;
+  context: SettlementContext;
   online: boolean;
   operations: WalletOperation[];
   onQuote: (invoice: string) => Promise<MeltQuote>;
@@ -46,6 +52,7 @@ export function CashOutScreen({
   const [operationId, setOperationId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const confirmingRef = useRef(false);
   const operation = useMemo(
     () => operations.find((item): item is CashOutOperation => item.kind === "cashout" && item.id === operationId),
     [operationId, operations],
@@ -73,7 +80,8 @@ export function CashOutScreen({
   };
 
   const confirm = async () => {
-    if (!quote || !preparation) return;
+    if (!quote || !preparation || confirmingRef.current) return;
+    confirmingRef.current = true;
     setView("dispatching");
     setError(null);
     try {
@@ -93,6 +101,8 @@ export function CashOutScreen({
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The payment could not be prepared.");
       setView("review");
+    } finally {
+      confirmingRef.current = false;
     }
   };
 
@@ -174,6 +184,7 @@ export function CashOutScreen({
             <div><dt>Maximum debit</dt><dd className="mono">{fmt(total)} {ticker}</dd></div>
             <div className="detail-list__total"><dt>Balance after maximum</dt><dd className="mono">{fmt(preparation.balance - total)} {ticker}</dd></div>
           </dl>
+          <SettlementFacts context={context} mintUrl={mintUrl} unit={ticker} title="Cash-out settlement" />
         </section>
         <Notice tone="recoverable">The fee reserve is a ceiling. Unused change is recovered only after the mint returns a final response.</Notice>
         {insufficient ? <Notice tone="failed">The maximum debit is larger than your spendable balance.</Notice> : null}

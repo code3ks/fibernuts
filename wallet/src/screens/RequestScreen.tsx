@@ -127,7 +127,7 @@ export function RequestScreen({
 
   if (view === "result" && operation) {
     const settled = operation.state === "settled";
-    const failed = operation.state === "failed";
+    const failed = ["failed", "rejected", "spent"].includes(operation.state);
     return (
       <div className="flow-column flow-enter">
         <section className="result-receipt">

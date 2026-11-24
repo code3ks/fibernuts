@@ -36,7 +36,18 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport + 1);
 }
 
-async function mockCompatibleMint(page: Page, inputFeePpk = 0, proofState: "UNSPENT" | "PENDING" | "SPENT" = "UNSPENT") {
+interface MockMintOptions {
+  meltExecution?: "PAID" | "PENDING" | "UNPAID" | "abort";
+  meltStatus?: "PAID" | "PENDING" | "UNPAID";
+  meltStatusDelayMs?: number;
+}
+
+async function mockCompatibleMint(
+  page: Page,
+  inputFeePpk = 0,
+  proofState: "UNSPENT" | "PENDING" | "SPENT" = "UNSPENT",
+  options: MockMintOptions = {},
+) {
   const privateKeys = new Map<string, Uint8Array>();
   const keys = Object.fromEntries(Array.from({ length: 20 }, (_, index) => {
     const amount = String(2 ** index);
@@ -141,17 +152,40 @@ async function mockCompatibleMint(page: Page, inputFeePpk = 0, proofState: "UNSP
       });
       return;
     }
+    if (path === "/v1/melt/quote/fiber/melt-quote-browser-test" && request.method() === "GET") {
+      if (options.meltStatusDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.meltStatusDelayMs));
+      }
+      await route.fulfill({
+        json: {
+          quote: "melt-quote-browser-test",
+          request: "fibt1external-synthetic-invoice",
+          state: options.meltStatus ?? "PAID",
+          expiry: Math.floor(Date.now() / 1000) + 3600,
+          amount: 250,
+          fee_reserve: 2,
+          payment_preimage: null,
+          unit: "rusd",
+        },
+      });
+      return;
+    }
     if (path === "/v1/melt/fiber" && request.method() === "POST") {
+      if (options.meltExecution === "abort") {
+        await route.abort("connectionfailed");
+        return;
+      }
       const body = request.postDataJSON() as { outputs?: Array<{ amount: number | string; B_: string; id: string }> };
       const [blank] = body.outputs ?? [];
-      const change = blank
+      const state = options.meltExecution ?? "PAID";
+      const change = state === "PAID" && blank
         ? signOutputs([{ ...blank, amount: 4 }])
         : [];
       await route.fulfill({
         json: {
           quote: "melt-quote-browser-test",
           request: "fibt1external-synthetic-invoice",
-          state: "PAID",
+          state,
           expiry: Math.floor(Date.now() / 1000) + 3600,
           amount: 250,
           fee_reserve: 2,
@@ -586,11 +620,136 @@ test("an unclaimed incoming token requires confirmation before local removal", a
   await expect(page.getByText(/may be permanently lost/i)).toBeVisible();
   await page.getByRole("button", { name: "Remove token" }).click();
 
-  await expect(page.getByText(/bearer token was removed from this device/i)).toBeVisible();
+  await expect(page.getByText(/locally stored bearer token was explicitly removed/i)).toBeVisible();
   await expect(page.getByText("Bearer token", { exact: true })).toHaveCount(0);
   const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("fibernuts:wallet:v2:http://127.0.0.1:5174") ?? "{}"));
-  expect(stored.operations[0].state).toBe("failed");
+  expect(stored.operations[0].state).toBe("discarded");
   expect(stored.operations[0].token).toBeUndefined();
+});
+
+test("an interrupted cash-out preserves provenance and reserved value across reload", async ({ page }, testInfo) => {
+  const keysetId = await mockCompatibleMint(page, 0, "UNSPENT", {
+    meltExecution: "abort",
+    meltStatus: "PENDING",
+    meltStatusDelayMs: 250,
+  });
+  await page.addInitScript((activeKeysetId) => {
+    const mintUrl = "http://127.0.0.1:5174";
+    const key = `fibernuts:wallet:v2:${mintUrl}`;
+    if (localStorage.getItem(key)) return;
+    localStorage.setItem(
+      key,
+      JSON.stringify({
+        version: 2,
+        unit: "rusd",
+        proofs: [{ amount: 256, id: activeKeysetId, secret: "interrupted-cashout-source", C: `02${"66".repeat(32)}` }],
+        operations: [],
+      }),
+    );
+  }, keysetId);
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/");
+  await expect(page.getByText("Mint compatible")).toBeVisible();
+  await page.getByRole("button", { name: "Cash out" }).click();
+  await page.getByLabel("External Fiber invoice").fill("fibt1external-synthetic-invoice");
+  await page.getByRole("button", { name: "Review quote" }).click();
+  await expect(page.getByText("Cash-out settlement")).toBeVisible();
+  await expect(page.getByText(`0x${"11".repeat(32)}`)).toBeVisible();
+  await page.getByRole("button", { name: "Confirm cash-out" }).click();
+  await expect(page.getByText("Status unknown")).toBeVisible();
+  await expect(page.getByText(/reserved proofs remain stored/i)).toBeVisible();
+
+  await page.getByRole("button", { name: "Done" }).click();
+  await page.locator(".desktop-nav").getByRole("button", { name: "Activity" }).click();
+  await page.getByRole("button", { name: /Cashed out/i }).click();
+  await expect(page.getByText("Status unknown - recoverable")).toBeVisible();
+  await expect(page.getByText(/selected proofs remain reserved and excluded/i)).toBeVisible();
+  await expect(page.getByText("Reserved proof value")).toBeVisible();
+  await expect(page.getByText("2.56 RUSD")).toBeVisible();
+  await expect(page.getByText("Source: Operator configuration").first()).toBeVisible();
+
+  await page.reload();
+  await page.locator(".desktop-nav").getByRole("button", { name: "Activity" }).click();
+  await page.getByRole("button", { name: /Cashed out/i }).click();
+  await expect(page.getByText("Payment pending")).toBeVisible();
+  await expect(page.getByText(/selected proofs remain reserved and excluded/i)).toBeVisible();
+
+  for (const viewport of viewports) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: testInfo.outputPath(`cashout-recovery-${viewport.name}.png`), fullPage: true });
+  }
+
+  const checkButton = page.getByRole("button", { name: "Check status" });
+  await expect(checkButton).toBeEnabled();
+  let statusRequests = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/v1/melt/quote/fiber/melt-quote-browser-test") statusRequests += 1;
+  });
+  await checkButton.evaluate((button) => {
+    button.click();
+    button.click();
+  });
+  await expect(checkButton).toBeDisabled();
+  await expect.poll(() => statusRequests).toBe(1);
+  await expect(checkButton).toBeEnabled();
+  await checkButton.focus();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => statusRequests).toBe(2);
+});
+
+test("pending outgoing proofs stay non-spendable after reload", async ({ page }) => {
+  const keysetId = await mockCompatibleMint(page, 0, "PENDING");
+  const mintUrl = "http://127.0.0.1:5174";
+  const point = `02${"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}`;
+  const token = getEncodedToken({
+    mint: mintUrl,
+    unit: "rusd",
+    proofs: [{ amount: 256, id: keysetId, secret: "pending-outgoing-proof", C: point }],
+  });
+  await page.addInitScript(({ outgoingToken }) => {
+    const activeMint = "http://127.0.0.1:5174";
+    localStorage.setItem(
+      `fibernuts:wallet:v2:${activeMint}`,
+      JSON.stringify({
+        version: 2,
+        unit: "rusd",
+        proofs: [],
+        operations: [{
+          id: "pending-outgoing",
+          kind: "send",
+          state: "awaiting_acceptance",
+          amount: 256,
+          fee: 0,
+          createdAt: 1_700_000_000_000,
+          updatedAt: 1_700_000_000_000,
+          mintUrl: activeMint,
+          unit: "rusd",
+          token: outgoingToken,
+        }],
+      }),
+    );
+  }, { outgoingToken: token });
+
+  await page.goto("/");
+  await expect(page.getByText("Mint compatible")).toBeVisible();
+  await page.locator(".desktop-nav").getByRole("button", { name: "Activity" }).click();
+  await expect(page.getByText("Pending", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /Sent payment/i }).click();
+  await expect(page.getByText("Acceptance in progress")).toBeVisible();
+  await expect(page.getByText(/token value is not spendable and cannot be safely reclaimed/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reclaim if unspent" })).toHaveCount(0);
+
+  await page.reload();
+  await page.locator(".desktop-nav").getByRole("button", { name: "Activity" }).click();
+  await page.getByRole("button", { name: /Sent payment/i }).click();
+  await expect(page.getByText("Acceptance in progress")).toBeVisible();
+  const storedState = await page.evaluate(() => {
+    const stored = JSON.parse(localStorage.getItem("fibernuts:wallet:v2:http://127.0.0.1:5174") ?? "{}");
+    return stored.operations[0].state;
+  });
+  expect(storedState).toBe("acceptance_pending");
 });
 
 test("stored value stays bound to its original unit when mint metadata changes", async ({ page }) => {

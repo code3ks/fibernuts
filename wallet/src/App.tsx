@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Proof } from "@cashu/cashu-ts";
+import { UnknownKeysetError, type Proof } from "@cashu/cashu-ts";
 
 import { AppShell, type MintConnectionStatus } from "./components/AppShell";
 import type { AppScreen } from "./domain/navigation";
@@ -13,6 +13,10 @@ import {
   type StoredMeltQuote,
   type WalletOperation,
 } from "./domain/operations";
+import {
+  createOperatorSettlementDeclaration,
+  createSettlementContext,
+} from "./domain/settlement-context";
 import { normalizeMintUrl, validatePaymentRequest, type DecodedPaymentRequest } from "./lib/payment-request";
 import {
   loadActiveMint,
@@ -45,10 +49,20 @@ import { RequestScreen } from "./screens/RequestScreen";
 const DEFAULT_MINT =
   import.meta.env.VITE_MINT_URL ??
   (window.location.port === "5174" ? window.location.origin : "https://mint.fibernuts.xyz");
-const NETWORK_LABEL = import.meta.env.VITE_NETWORK_LABEL ?? "Network not declared";
+const OPERATOR_SETTLEMENT = createOperatorSettlementDeclaration({
+  mintUrl: DEFAULT_MINT,
+  network: import.meta.env.VITE_NETWORK_LABEL,
+  assetCodeHash: import.meta.env.VITE_ASSET_CODE_HASH,
+  assetHashType: import.meta.env.VITE_ASSET_HASH_TYPE,
+  assetArgs: import.meta.env.VITE_ASSET_ARGS,
+});
 
 function describe(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
+}
+
+function isUnknownKeysetError(reason: unknown): boolean {
+  return reason instanceof UnknownKeysetError || (reason instanceof Error && reason.name === "UnknownKeysetError");
 }
 
 function safeHost(value: string): string {
@@ -79,6 +93,15 @@ function assertSingleUseRequestAvailable(request: DecodedPaymentRequest, operati
   );
   if (existing) {
     throw new Error("This single-use request already has a payment operation. Open Activity to check or recover it.");
+  }
+}
+
+function assertMeltQuoteAvailable(quoteId: string, operations: WalletOperation[]): void {
+  const existing = operations.find(
+    (operation) => operation.kind === "cashout" && operation.quote.quote === quoteId,
+  );
+  if (existing) {
+    throw new Error("This cash-out quote already has an operation. Open Activity to check its stored result.");
   }
 }
 
@@ -128,21 +151,38 @@ export default function App() {
   const [selectedOperationId, setSelectedOperationId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
+  const [inFlightOperationIds, setInFlightOperationIds] = useState<Set<string>>(() => new Set());
   const snapshotRef = useRef(snapshot);
+  const activeMintRef = useRef(mintUrl);
   const inFlightRef = useRef(new Set<string>());
+
+  const settlementContext = useMemo(
+    () => createSettlementContext({
+      mintUrl,
+      mintName: profile?.name,
+      unit: wallet?.unit ?? profile?.unit ?? snapshot.unit ?? DEFAULT_UNIT,
+      operatorDeclaration: OPERATOR_SETTLEMENT,
+      metadataSource: profile ? "mint_response" : "stored_operation",
+    }),
+    [mintUrl, profile, snapshot.unit, wallet?.unit],
+  );
 
   const commitSnapshot = useCallback(
     (next: WalletSnapshot) => {
       saveWalletSnapshot(mintUrl, next);
-      snapshotRef.current = next;
-      setSnapshot(next);
+      if (activeMintRef.current === mintUrl) {
+        snapshotRef.current = next;
+        setSnapshot(next);
+      }
     },
     [mintUrl],
   );
 
   const persistOperation = useCallback(
     (operation: WalletOperation, proofs?: Proof[], clearMatchingRequest = false) => {
-      const current = snapshotRef.current;
+      const current = activeMintRef.current === mintUrl
+        ? snapshotRef.current
+        : loadWalletSnapshot(mintUrl);
       const next: WalletSnapshot = {
         version: current.version,
         unit: current.unit,
@@ -156,11 +196,12 @@ export default function App() {
       commitSnapshot(next);
       return operation;
     },
-    [commitSnapshot],
+    [commitSnapshot, mintUrl],
   );
 
   useEffect(() => {
     let cancelled = false;
+    activeMintRef.current = mintUrl;
     const stored = loadWalletSnapshot(mintUrl);
     snapshotRef.current = stored;
     setSnapshot(stored);
@@ -223,10 +264,16 @@ export default function App() {
   const runLocked = useCallback(async <T,>(id: string, task: () => Promise<T>): Promise<T | undefined> => {
     if (inFlightRef.current.has(id)) return undefined;
     inFlightRef.current.add(id);
+    setInFlightOperationIds((current) => new Set(current).add(id));
     try {
       return await task();
     } finally {
       inFlightRef.current.delete(id);
+      setInFlightOperationIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
     }
   }, []);
 
@@ -275,6 +322,7 @@ export default function App() {
           updatedAt: now,
           mintUrl,
           unit: wallet.unit,
+          context: settlementContext,
           note: request.description,
           requestId: request.id,
           token: wallet.encodeProofs(prepared.send),
@@ -293,36 +341,40 @@ export default function App() {
         updatedAt: now,
         mintUrl,
         unit: wallet.unit,
+        context: settlementContext,
         note: request.description,
         requestId: request.id,
         swap: prepared.swap,
         fee: prepared.fee,
       };
       persistOperation(preparing, prepared.swap.unselectedProofs ?? []);
-      try {
-        saveWalletSnapshot(mintUrl, snapshotRef.current);
-        const result = await wallet.completePreparedSend(prepared.swap);
-        const ready: SendOperation = {
-          ...preparing,
-          state: "awaiting_acceptance",
-          updatedAt: Date.now(),
-          token: result.token,
-          swap: undefined,
-        };
-        persistOperation(ready, [...snapshotRef.current.proofs, ...result.change]);
-        return ready;
-      } catch (reason) {
-        const recoverable: SendOperation = {
-          ...preparing,
-          state: "recovery_required",
-          updatedAt: Date.now(),
-          error: `Token preparation is stored for retry. ${describe(reason)}`,
-        };
-        persistOperation(recoverable);
-        return recoverable;
-      }
+      const completed = await runLocked(preparing.id, async () => {
+        try {
+          saveWalletSnapshot(mintUrl, snapshotRef.current);
+          const result = await wallet.completePreparedSend(prepared.swap);
+          const ready: SendOperation = {
+            ...preparing,
+            state: "awaiting_acceptance",
+            updatedAt: Date.now(),
+            token: result.token,
+            swap: undefined,
+          };
+          persistOperation(ready, [...snapshotRef.current.proofs, ...result.change]);
+          return ready;
+        } catch (reason) {
+          const recoverable: SendOperation = {
+            ...preparing,
+            state: "recovery_required",
+            updatedAt: Date.now(),
+            error: `Token preparation is stored for retry. ${describe(reason)}`,
+          };
+          persistOperation(recoverable);
+          return recoverable;
+        }
+      });
+      return completed ?? preparing;
     },
-    [mintUrl, persistOperation, wallet],
+    [mintUrl, persistOperation, runLocked, settlementContext, wallet],
   );
 
   const settleReceive = useCallback(
@@ -340,38 +392,40 @@ export default function App() {
           try {
             swap = await wallet.prepareReceive(token);
           } catch (reason) {
-            const failed: ReceiveOperation = {
+            const unresolved: ReceiveOperation = {
               ...checking,
-              state: "failed",
+              state: isUnknownKeysetError(reason) ? "rejected" : "recoverable",
               updatedAt: Date.now(),
-              error: `Token validation failed. ${describe(reason)}`,
+              error: isUnknownKeysetError(reason)
+                ? `The issuing mint does not recognize this token's keyset. ${describe(reason)}`
+                : `Token validation could not finish. The bearer token remains stored. ${describe(reason)}`,
             };
-            persistOperation(failed);
-            return failed;
+            persistOperation(unresolved);
+            return unresolved;
           }
           if (latest.requestedAmount !== undefined && swap.amount !== latest.requestedAmount) {
-            const failed: ReceiveOperation = {
+            const rejected: ReceiveOperation = {
               ...checking,
-              state: "failed",
+              state: "rejected",
               amount: swap.amount,
               updatedAt: Date.now(),
               error: `The token settles to ${wallet.ticker} ${swap.amount} units, but the open request requires ${latest.requestedAmount}. It was not claimed.`,
             };
-            persistOperation(failed);
-            return failed;
+            persistOperation(rejected);
+            return rejected;
           }
           const tokenState = await wallet.checkTokenState(token);
           if (tokenState === "spent" || tokenState === "mixed") {
-            const failed: ReceiveOperation = {
+            const rejected: ReceiveOperation = {
               ...checking,
-              state: "failed",
+              state: tokenState === "spent" ? "spent" : "rejected",
               updatedAt: Date.now(),
               error: tokenState === "spent"
                 ? "These bearer proofs were already spent. No value was added to this wallet."
                 : "The token contains conflicting proof states. It cannot be settled as one payment.",
             };
-            persistOperation(failed);
-            return failed;
+            persistOperation(rejected);
+            return rejected;
           }
           if (tokenState === "pending") {
             const recoverable: ReceiveOperation = {
@@ -410,7 +464,9 @@ export default function App() {
         let state: ReceiveOperation["state"] = "recoverable";
         if (!latest.swap && latest.token) {
           try {
-            if ((await wallet.checkTokenState(latest.token)) === "spent") state = "failed";
+            const tokenState = await wallet.checkTokenState(latest.token);
+            if (tokenState === "spent") state = "spent";
+            if (tokenState === "mixed") state = "rejected";
           } catch {
             state = "recoverable";
           }
@@ -450,6 +506,7 @@ export default function App() {
         updatedAt: now,
         mintUrl,
         unit: wallet.unit,
+        context: settlementContext,
         note,
         requestId: openRequest?.id,
         requestedAmount: openRequest?.amount,
@@ -458,7 +515,7 @@ export default function App() {
       persistOperation(operation);
       return (await runLocked(operation.id, () => settleReceive(operation))) ?? operation;
     },
-    [mintUrl, persistOperation, runLocked, settleReceive, wallet],
+    [mintUrl, persistOperation, runLocked, settlementContext, settleReceive, wallet],
   );
 
   const requestAdd = useCallback(
@@ -475,6 +532,7 @@ export default function App() {
         updatedAt: now,
         mintUrl,
         unit: wallet.unit,
+        context: settlementContext,
         quoteId: quote.quote,
         invoice: quote.request,
         expiry: quote.expiry ?? undefined,
@@ -482,7 +540,7 @@ export default function App() {
       persistOperation(operation);
       return operation;
     },
-    [mintUrl, persistOperation, wallet],
+    [mintUrl, persistOperation, settlementContext, wallet],
   );
 
   const refreshAdd = useCallback(
@@ -684,6 +742,7 @@ export default function App() {
     async (preparation: CashOutPreparation): Promise<CashOutOperation> => {
       if (!wallet) throw new Error("The mint is not reachable.");
       const currentProofs = snapshotRef.current.proofs;
+      assertMeltQuoteAvailable(preparation.quote.quote, snapshotRef.current.operations);
       if (preparation.proofFingerprint !== proofFingerprint(currentProofs)) {
         throw new Error("The wallet balance changed. Review the recalculated maximum debit before cashing out.");
       }
@@ -699,6 +758,7 @@ export default function App() {
         updatedAt: now,
         mintUrl,
         unit: wallet.unit,
+        context: settlementContext,
         invoice: quote.request,
         quote: storeMeltQuote(quote),
         cashuFee: prepared.inputFee,
@@ -708,43 +768,46 @@ export default function App() {
       };
       persistOperation(operation, prepared.keep);
 
-      try {
-        const result = await wallet.executeMelt(quote, prepared);
-        if (result.state === "PAID") {
-          const paid: CashOutOperation = {
+      const completed = await runLocked(operation.id, async () => {
+        try {
+          const result = await wallet.executeMelt(quote, prepared);
+          if (result.state === "PAID") {
+            const paid: CashOutOperation = {
+              ...operation,
+              state: "paid",
+              updatedAt: Date.now(),
+              quote: { ...operation.quote, state: "PAID" },
+              reservedProofs: undefined,
+              outputData: undefined,
+              keysetId: undefined,
+            };
+            persistOperation(paid, [...snapshotRef.current.proofs, ...result.change]);
+            return paid;
+          }
+          const unresolved: CashOutOperation = {
             ...operation,
-            state: "paid",
+            state: result.state === "PENDING" ? "pending" : "unknown",
             updatedAt: Date.now(),
-            quote: { ...operation.quote, state: "PAID" },
-            reservedProofs: undefined,
-            outputData: undefined,
-            keysetId: undefined,
+            quote: { ...operation.quote, state: result.state },
+            outputData: result.outputData,
+            error: result.state === "UNPAID" ? "The mint returned unpaid; check status to recover reserved value." : undefined,
           };
-          persistOperation(paid, [...snapshotRef.current.proofs, ...result.change]);
-          return paid;
+          persistOperation(unresolved);
+          return unresolved;
+        } catch (reason) {
+          const unknown: CashOutOperation = {
+            ...operation,
+            state: "unknown",
+            updatedAt: Date.now(),
+            error: describe(reason),
+          };
+          persistOperation(unknown);
+          return unknown;
         }
-        const unresolved: CashOutOperation = {
-          ...operation,
-          state: result.state === "PENDING" ? "pending" : "unknown",
-          updatedAt: Date.now(),
-          quote: { ...operation.quote, state: result.state },
-          outputData: result.outputData,
-          error: result.state === "UNPAID" ? "The mint returned unpaid; check status to recover reserved value." : undefined,
-        };
-        persistOperation(unresolved);
-        return unresolved;
-      } catch (reason) {
-        const unknown: CashOutOperation = {
-          ...operation,
-          state: "unknown",
-          updatedAt: Date.now(),
-          error: describe(reason),
-        };
-        persistOperation(unknown);
-        return unknown;
-      }
+      });
+      return completed ?? operation;
     },
-    [mintUrl, persistOperation, wallet],
+    [mintUrl, persistOperation, runLocked, settlementContext, wallet],
   );
 
   const refreshSend = useCallback(
@@ -776,11 +839,30 @@ export default function App() {
           return;
         }
         if (operation.token) {
-          const tokenState = await wallet.checkTokenState(operation.token);
-          if (tokenState === "spent") {
-            persistOperation({ ...operation, state: "accepted", updatedAt: Date.now(), token: undefined, error: undefined });
-          } else if (tokenState === "mixed") {
-            persistOperation({ ...operation, state: "recovery_required", updatedAt: Date.now(), error: "The token's proofs do not share one spend state." });
+          try {
+            const tokenState = await wallet.checkTokenState(operation.token);
+            if (tokenState === "spent") {
+              persistOperation({ ...operation, state: "accepted", updatedAt: Date.now(), token: undefined, error: undefined });
+            } else if (tokenState === "pending") {
+              persistOperation({
+                ...operation,
+                state: "acceptance_pending",
+                updatedAt: Date.now(),
+                error: "The mint reports the outgoing proofs pending. They cannot be safely reclaimed yet.",
+              });
+            } else if (tokenState === "mixed") {
+              persistOperation({ ...operation, state: "recovery_required", updatedAt: Date.now(), error: "The token's proofs do not share one spend state." });
+            } else {
+              persistOperation({ ...operation, state: "awaiting_acceptance", updatedAt: Date.now(), error: undefined });
+            }
+          } catch (reason) {
+            persistOperation({
+              ...operation,
+              state: "recovery_required",
+              updatedAt: Date.now(),
+              error: `Acceptance status could not be established. ${describe(reason)}`,
+            });
+            throw reason;
           }
         }
       });
@@ -797,6 +879,21 @@ export default function App() {
         if (tokenState === "spent") {
           persistOperation({ ...operation, state: "accepted", updatedAt: Date.now(), token: undefined, error: undefined });
           return;
+        }
+        if (tokenState === "pending") {
+          persistOperation({
+            ...operation,
+            state: "acceptance_pending",
+            updatedAt: Date.now(),
+            error: "The mint reports the outgoing proofs pending. They cannot be safely reclaimed yet.",
+          });
+        } else if (tokenState === "mixed") {
+          persistOperation({
+            ...operation,
+            state: "recovery_required",
+            updatedAt: Date.now(),
+            error: "The outgoing proofs do not share one spend state, so reclaim is unsafe.",
+          });
         }
         if (tokenState !== "unspent") {
           throw new Error("The token is not safely reclaimable yet.");
@@ -853,15 +950,15 @@ export default function App() {
         if (latest.swap) {
           throw new Error("Recovery has already started. Keep the stored outputs until the mint returns a definitive result.");
         }
-        const failed: ReceiveOperation = {
+        const removed: ReceiveOperation = {
           ...latest,
-          state: "failed",
+          state: "discarded",
           updatedAt: Date.now(),
           token: undefined,
-          error: "The bearer token was removed from this device before settlement. No value was added to the balance.",
+          error: undefined,
         };
-        persistOperation(failed);
-        return failed;
+        persistOperation(removed);
+        return removed;
       });
       if (!discarded) throw new Error("This operation is being checked. Try removal again after the check finishes.");
     },
@@ -897,7 +994,12 @@ export default function App() {
   };
 
   const changeMint = (next: string) => {
+    if (inFlightRef.current.size > 0) {
+      setToast("Wait for the current wallet operation to finish before changing mint.");
+      return;
+    }
     saveActiveMint(next);
+    activeMintRef.current = next;
     setMintUrl(next);
     setScreen("home");
     setSelectedOperationId(null);
@@ -929,19 +1031,19 @@ export default function App() {
   if (screen === "home") {
     content = <HomeScreen balance={balance} proofCount={snapshot.proofs.length} ticker={ticker} mintName={mintName} status={status} connectionError={connectionError} operations={orderedOperations} onNavigate={navigate} onOpenOperation={openOperation} onRetry={() => setReloadKey((value) => value + 1)} />;
   } else if (screen === "pay") {
-    content = <PayScreen ticker={ticker} mintName={mintName} operations={orderedOperations} onPreparePayment={prepareOutgoing} onCreatePayment={createOutgoing} onDone={() => navigate("home")} />;
+    content = <PayScreen ticker={ticker} mintName={mintName} mintUrl={mintUrl} context={settlementContext} operations={orderedOperations} onPreparePayment={prepareOutgoing} onCreatePayment={createOutgoing} onDone={() => navigate("home")} />;
   } else if (screen === "request") {
     content = <RequestScreen ticker={ticker} mintUrl={mintUrl} mintName={mintName} online={status === "online"} operations={orderedOperations} savedRequest={snapshot.openRequest} onSaveRequest={saveOpenRequest} onClearRequest={clearOpenRequest} onReceive={receiveToken} onDone={() => navigate("home")} />;
   } else if (screen === "add") {
     content = <AddCashScreen ticker={ticker} mintName={mintName} online={status === "online"} operations={orderedOperations} onRequest={requestAdd} onRefresh={refreshAdd} onDone={() => navigate("home")} />;
   } else if (screen === "cashout") {
-    content = <CashOutScreen balance={balance} ticker={ticker} mintName={mintName} online={status === "online"} operations={orderedOperations} onQuote={quoteCashOut} onPrepare={prepareCashOut} onConfirm={confirmCashOut} onRefresh={refreshCashOut} onDone={() => navigate("home")} />;
+    content = <CashOutScreen balance={balance} ticker={ticker} mintName={mintName} mintUrl={mintUrl} context={settlementContext} online={status === "online"} operations={orderedOperations} onQuote={quoteCashOut} onPrepare={prepareCashOut} onConfirm={confirmCashOut} onRefresh={refreshCashOut} onDone={() => navigate("home")} />;
   } else if (screen === "activity") {
     content = <ActivityScreen operations={orderedOperations} onOpen={openOperation} />;
   } else if (screen === "operation" && selectedOperation) {
-    content = <OperationDetailScreen operation={selectedOperation} ticker={ticker} online={status === "online"} onRefresh={refreshOperation} onReclaim={reclaimOperation} onDiscard={discardIncomingToken} />;
+    content = <OperationDetailScreen operation={selectedOperation} ticker={ticker} online={status === "online"} checking={inFlightOperationIds.has(selectedOperation.id)} onRefresh={refreshOperation} onReclaim={reclaimOperation} onDiscard={discardIncomingToken} />;
   } else if (screen === "mint") {
-    content = <MintScreen mintUrl={mintUrl} ticker={ticker} network={NETWORK_LABEL} status={status} profile={profile} connectionError={connectionError} onChangeMint={changeMint} onRetry={() => setReloadKey((value) => value + 1)} />;
+    content = <MintScreen mintUrl={mintUrl} ticker={ticker} context={settlementContext} status={status} profile={profile} connectionError={connectionError} onChangeMint={changeMint} onRetry={() => setReloadKey((value) => value + 1)} />;
   } else {
     content = <ActivityScreen operations={orderedOperations} onOpen={openOperation} />;
   }
@@ -951,7 +1053,7 @@ export default function App() {
       screen={screen}
       mintName={mintName}
       mintHost={safeHost(mintUrl)}
-      network={NETWORK_LABEL}
+      network={settlementContext.network?.value ?? "Network not declared"}
       ticker={ticker}
       status={status}
       onNavigate={navigate}
