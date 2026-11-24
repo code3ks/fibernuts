@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { UnknownKeysetError, type Proof } from "@cashu/cashu-ts";
 
 import { AppShell, type MintConnectionStatus } from "./components/AppShell";
+import { safeErrorMessage } from "./domain/errors";
 import type { AppScreen } from "./domain/navigation";
 import {
   createOperationId,
@@ -58,11 +59,13 @@ const OPERATOR_SETTLEMENT = createOperatorSettlementDeclaration({
 });
 
 function describe(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
+  return safeErrorMessage(reason);
 }
 
 function isUnknownKeysetError(reason: unknown): boolean {
-  return reason instanceof UnknownKeysetError || (reason instanceof Error && reason.name === "UnknownKeysetError");
+  if (reason instanceof UnknownKeysetError) return true;
+  if (!(reason instanceof Error)) return false;
+  return reason.name === "UnknownKeysetError" || /(?:unknown keyset|keyset ID.*known keysets)/i.test(reason.message);
 }
 
 function safeHost(value: string): string {
@@ -487,7 +490,7 @@ export default function App() {
   const receiveToken = useCallback(
     async (token: string, note: string): Promise<ReceiveOperation> => {
       if (!wallet) throw new Error("The mint is not reachable.");
-      const inspected = wallet.inspectToken(token);
+      const inspected = wallet.inspectTokenEnvelope(token);
       if (normalizeMintUrl(inspected.mint) !== normalizeMintUrl(mintUrl)) {
         throw new Error(`This token was issued by ${safeHost(inspected.mint)}, not the active mint.`);
       }
@@ -823,7 +826,7 @@ export default function App() {
                 { ...operation, state: "reclaimed", updatedAt: Date.now(), token: undefined, swap: undefined, error: undefined },
                 [...snapshotRef.current.proofs, ...proofs],
               );
-              setToast("Unaccepted token reclaimed");
+              setToast("Unclaimed token reclaimed");
             } else {
               const result = await wallet.completePreparedSend(operation.swap);
               persistOperation(
@@ -909,7 +912,7 @@ export default function App() {
             { ...reclaiming, state: "reclaimed", updatedAt: Date.now(), token: undefined, swap: undefined, error: undefined },
             [...snapshotRef.current.proofs, ...proofs],
           );
-          setToast("Unaccepted token reclaimed");
+          setToast("Unclaimed token reclaimed");
         } catch (reason) {
           persistOperation({ ...reclaiming, state: "recovery_required", updatedAt: Date.now(), error: describe(reason) });
           throw reason;
@@ -934,7 +937,7 @@ export default function App() {
 
   const reclaimOperation = useCallback(
     async (operation: WalletOperation): Promise<void> => {
-      if (operation.kind !== "send") throw new Error("Only an unaccepted outgoing token can be reclaimed here.");
+      if (operation.kind !== "send") throw new Error("Only an unclaimed outgoing token can be reclaimed here.");
       return reclaimSend(operation);
     },
     [reclaimSend],

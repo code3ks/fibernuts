@@ -1,6 +1,7 @@
 import {
   CheckStateEnum,
   getPubKeyFromPrivKey,
+  getTokenMetadata,
   hasValidDleq,
   parseP2PKSecret,
   Mint,
@@ -73,6 +74,8 @@ export interface InspectedToken {
   proofs: Proof[];
   memo?: string;
 }
+
+export type InspectedTokenEnvelope = Omit<InspectedToken, "proofs">;
 
 export type TokenSpendState = "unspent" | "pending" | "spent" | "mixed";
 
@@ -509,17 +512,26 @@ export class FibernutsWallet {
   }
 
   inspectToken(token: string): InspectedToken {
+    const envelope = this.inspectTokenEnvelope(token);
     const decoded = this.wallet.decodeToken(token);
-    const amount = sumProofs(decoded.proofs);
-    if (!Number.isSafeInteger(amount) || amount <= 0 || decoded.proofs.length === 0) {
+    return {
+      ...envelope,
+      proofs: decoded.proofs.map(normalizeProof),
+    };
+  }
+
+  /** Decode routing fields without requiring the token's keyset to be loaded. */
+  inspectTokenEnvelope(token: string): InspectedTokenEnvelope {
+    const metadata = getTokenMetadata(token);
+    const amount = units(metadata.amount);
+    if (!Number.isSafeInteger(amount) || amount <= 0 || metadata.proofAmounts.length === 0) {
       throw new Error("This token does not contain a valid positive amount.");
     }
     return {
       amount,
-      mint: normalizeUrl(decoded.mint),
-      unit: (decoded.unit ?? this.unit).toLowerCase(),
-      proofs: decoded.proofs.map(normalizeProof),
-      memo: decoded.memo,
+      mint: normalizeUrl(metadata.mint),
+      unit: metadata.unit.toLowerCase(),
+      memo: metadata.memo,
     };
   }
 

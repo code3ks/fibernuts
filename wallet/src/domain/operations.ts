@@ -136,9 +136,9 @@ const PRESENTATION: Record<WalletOperation["kind"], Record<string, Omit<Operatio
   },
   send: {
     preparing: { title: "Sent payment", stateLabel: "Preparing token", stateShort: "Processing", tone: "processing", phase: "processing" },
-    awaiting_acceptance: { title: "Sent payment", stateLabel: "Awaiting acceptance", stateShort: "Awaiting", tone: "pending", phase: "pending" },
-    acceptance_pending: { title: "Sent payment", stateLabel: "Acceptance in progress", stateShort: "Pending", tone: "pending", phase: "pending" },
-    accepted: { title: "Sent payment", stateLabel: "Accepted", stateShort: "Accepted", tone: "settled", phase: "settled" },
+    awaiting_acceptance: { title: "Sent payment", stateLabel: "Awaiting claim", stateShort: "Awaiting", tone: "pending", phase: "pending" },
+    acceptance_pending: { title: "Sent payment", stateLabel: "Claim in progress", stateShort: "Pending", tone: "pending", phase: "pending" },
+    accepted: { title: "Sent payment", stateLabel: "Token spent", stateShort: "Spent", tone: "settled", phase: "settled" },
     reclaiming: { title: "Sent payment", stateLabel: "Reclaiming", stateShort: "Processing", tone: "processing", phase: "processing" },
     reclaimed: { title: "Sent payment", stateLabel: "Value reclaimed", stateShort: "Reclaimed", tone: "settled", phase: "settled" },
     recovery_required: { title: "Sent payment", stateLabel: "Status unknown - recoverable", stateShort: "Recoverable", tone: "recoverable", phase: "recoverable" },
@@ -219,7 +219,7 @@ export function operationGuidance(operation: WalletOperation): OperationGuidance
 
   if (operation.kind === "send") {
     if (operation.state === "accepted") return {
-      known: "The mint reports the outgoing proofs spent by the recipient.",
+      known: "The mint reports every outgoing proof spent. The wallet cannot identify who claimed the bearer token.",
       valueStatus: "The amount is no longer part of this wallet's balance.",
       nextAction: "No recovery action is available or required.",
     };
@@ -251,7 +251,7 @@ export function operationGuidance(operation: WalletOperation): OperationGuidance
       nextAction: "Check the stored operation again; reclaim only after every proof is authoritatively unspent.",
     };
     return {
-      known: "The bearer token is stored, but recipient acceptance has not been proven.",
+      known: "The bearer token is stored, but no successful claim has been proven.",
       valueStatus: "The token amount and fee remain outside the spendable balance.",
       nextAction: "Redisplay the same token or check its proof state before considering reclaim.",
     };
@@ -307,7 +307,7 @@ export function operationGuidance(operation: WalletOperation): OperationGuidance
     nextAction: "Keep this operation stored and wait for the first status result.",
   };
   return {
-    known: "The wallet could not establish a definitive result for the dispatched Fiber payment.",
+    known: "The wallet could not establish whether the mint accepted or completed the cash-out request.",
     valueStatus: "The selected proofs remain reserved and excluded from the spendable balance.",
     nextAction: "Check the same quote again; do not repeat the cash-out or treat the value as refunded.",
   };

@@ -7,6 +7,7 @@ import type { CashOutOperation, WalletOperation } from "../domain/operations";
 import type { SettlementContext } from "../domain/settlement-context";
 import { explainMeltError, fmt, units, type MeltQuote, type PreparedMelt } from "../lib/wallet";
 import { SettlementFacts } from "../components/SettlementFacts";
+import { safeErrorMessage } from "../domain/errors";
 
 type CashOutView = "invoice" | "review" | "dispatching" | "status";
 
@@ -73,7 +74,7 @@ export function CashOutScreen({
       setPreparation(nextPreparation);
       setView("review");
     } catch (reason) {
-      setError(explainMeltError(reason instanceof Error ? reason.message : "The invoice could not be quoted."));
+      setError(explainMeltError(safeErrorMessage(reason, "The invoice could not be quoted.")));
     } finally {
       setBusy(false);
     }
@@ -99,7 +100,7 @@ export function CashOutScreen({
       setOperationId(created.id);
       setView("status");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The payment could not be prepared.");
+      setError(safeErrorMessage(reason, "The payment could not be prepared."));
       setView("review");
     } finally {
       confirmingRef.current = false;
@@ -113,7 +114,7 @@ export function CashOutScreen({
     try {
       await onRefresh(operation);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The payment status could not be checked.");
+      setError(safeErrorMessage(reason, "The payment status could not be checked."));
     } finally {
       setBusy(false);
     }
@@ -144,7 +145,13 @@ export function CashOutScreen({
         <ProgressSteps
           steps={[
             { label: "Proofs reserved", detail: "Inputs and change recovery data were stored together.", state: "done" },
-            { label: "Payment dispatched", detail: "The mint was asked to pay the Fiber invoice.", state: failed ? "failed" : "done" },
+            {
+              label: "Mint request",
+              detail: operation.state === "unknown"
+                ? "The wallet cannot tell whether the mint accepted the request."
+                : "The mint returned an authoritative state for this request.",
+              state: operation.state === "unknown" ? "active" : failed ? "failed" : "done",
+            },
             { label: "Final result", detail: paid ? "The invoice is paid and change is stored." : failed ? "The mint confirmed failure and value was recovered." : "The mint has not returned a final state.", state: paid ? "done" : failed ? "failed" : "active" },
           ]}
         />

@@ -3,6 +3,7 @@ import { useCallback, useMemo, useRef, useState, type FormEvent } from "react";
 
 import { Button, AmountInput, FormTextarea, Notice, ProgressSteps, QrPanel, QuickAmounts, StatusBadge } from "../components/Primitives";
 import { QrScanner } from "../components/QrScanner";
+import { safeErrorMessage } from "../domain/errors";
 import type { ReceiveOperation, WalletOperation } from "../domain/operations";
 import { createPaymentRequest, type DecodedPaymentRequest } from "../lib/payment-request";
 import { fmt, parseAmount } from "../lib/wallet";
@@ -59,7 +60,7 @@ export function RequestScreen({
       setError(null);
       setView("present");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The request could not be created.");
+      setError(safeErrorMessage(reason, "The request could not be created."));
     }
   };
 
@@ -79,7 +80,7 @@ export function RequestScreen({
         setToken("");
         setView("result");
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : "The token could not be secured.");
+        setError(safeErrorMessage(reason, "The token could not be secured."));
         setView("present");
       } finally {
         receivingRef.current = false;

@@ -239,4 +239,36 @@ describe("wallet storage", () => {
     expect(restored.operations.map((operation) => operation.state)).toEqual(["acceptance_pending", "discarded"]);
     expect(restored.operations[0].context).toBeUndefined();
   });
+
+  it("redacts legacy operation errors and drops malformed display text on reload", () => {
+    const storage = new MemoryStorage();
+    const mintUrl = "https://mint.example";
+    const token = `cashuB${"a".repeat(80)}`;
+    storage.setItem(
+      `fibernuts:wallet:v2:${mintUrl}`,
+      JSON.stringify({
+        version: 2,
+        unit: "rusd",
+        proofs: [],
+        operations: [{
+          id: "legacy-error",
+          kind: "send",
+          state: "recovery_required",
+          amount: 2,
+          createdAt: 1,
+          updatedAt: 1,
+          mintUrl,
+          unit: "rusd",
+          note: { unsafe: true },
+          error: `Third-party error echoed ${token}`,
+          token: "cashuBsynthetic",
+        }],
+      }),
+    );
+
+    const [operation] = loadWalletSnapshot(mintUrl, storage).operations;
+    expect(operation.note).toBeUndefined();
+    expect(operation.error).toContain("[redacted Cashu token]");
+    expect(operation.error).not.toContain(token);
+  });
 });

@@ -1,6 +1,7 @@
 import { deserializeProofs, type Proof, type ProofLike } from "@cashu/cashu-ts";
 
 import type { CashOutOperation, StoredSwapPreview, WalletOperation } from "../domain/operations";
+import { safeErrorMessage } from "../domain/errors";
 import { normalizeSettlementContext } from "../domain/settlement-context";
 import { normalizeMintUrl, type DecodedPaymentRequest } from "./payment-request";
 
@@ -56,6 +57,8 @@ function normalizeOperations(value: unknown): WalletOperation[] {
     const context = normalizedContext?.unit.value.toLowerCase() === operation.unit.toLowerCase()
       ? normalizedContext
       : undefined;
+    const note = typeof raw.note === "string" ? raw.note : undefined;
+    const error = typeof raw.error === "string" ? safeErrorMessage(raw.error) : undefined;
     if (operation.kind === "add") {
       if (
         !["awaiting_payment", "payment_observed", "issuing", "settled", "expired", "recoverable", "failed"].includes(operation.state) ||
@@ -70,7 +73,7 @@ function normalizeOperations(value: unknown): WalletOperation[] {
         ? operation.quotePrivateKey
         : undefined;
       if (fundingSource && !quotePubkey) return [];
-      return [{ ...operation, context, fundingSource, quotePubkey, quotePrivateKey }];
+      return [{ ...operation, context, note, error, fundingSource, quotePubkey, quotePrivateKey }];
     }
 
     if (operation.kind === "send") {
@@ -78,6 +81,8 @@ function normalizeOperations(value: unknown): WalletOperation[] {
       return [{
         ...operation,
         context,
+        note,
+        error,
         fee: Number.isSafeInteger(operation.fee) && (operation.fee ?? -1) >= 0 ? operation.fee : undefined,
         token: typeof operation.token === "string" ? operation.token : undefined,
         swap: normalizeSwap(operation.swap),
@@ -89,6 +94,8 @@ function normalizeOperations(value: unknown): WalletOperation[] {
       return [{
         ...operation,
         context,
+        note,
+        error,
         requestId: typeof operation.requestId === "string" ? operation.requestId : undefined,
         requestedAmount: Number.isSafeInteger(operation.requestedAmount) && (operation.requestedAmount ?? 0) > 0
           ? operation.requestedAmount
@@ -112,6 +119,8 @@ function normalizeOperations(value: unknown): WalletOperation[] {
       const cashout: CashOutOperation = {
         ...operation,
         context,
+        note,
+        error,
         cashuFee: Number.isSafeInteger(operation.cashuFee) && (operation.cashuFee ?? -1) >= 0
           ? operation.cashuFee
           : undefined,

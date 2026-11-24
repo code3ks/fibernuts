@@ -59,6 +59,14 @@ describe("operation presentation", () => {
     expect(operationGuidance(pending).valueStatus).toMatch(/not spendable/i);
   });
 
+  it("does not attribute a spent bearer token to a specific claimant", () => {
+    const spent = { ...base, kind: "send", state: "accepted" } satisfies WalletOperation;
+
+    expect(presentOperation(spent).stateLabel).toBe("Token spent");
+    expect(operationGuidance(spent).known).toMatch(/cannot identify who claimed/i);
+    expect(operationGuidance(spent).known).not.toMatch(/recipient/i);
+  });
+
   it("describes removed incoming tokens as stopped rather than failed settlement", () => {
     const discarded = { ...base, kind: "receive", state: "discarded" } satisfies WalletOperation;
 

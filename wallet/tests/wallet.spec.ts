@@ -390,7 +390,7 @@ test("payment review covers proof fees and blocks a repeated single-use request"
   await expect(page.getByText("0.01 RUSD")).toBeVisible();
   await expect(page.getByText("10.24 RUSD")).toBeVisible();
   await page.getByRole("button", { name: "Pay 10.23 RUSD" }).click();
-  await expect(page.getByText("Awaiting acceptance")).toBeVisible();
+  await expect(page.getByText("Awaiting claim")).toBeVisible();
 
   await page.getByRole("button", { name: "Pay again" }).click();
   await page.getByLabel("Cashu payment request").fill(request);
@@ -425,6 +425,44 @@ test("a returned token with the wrong net amount is rejected before swap", async
   await expect(page.getByText("Payment not accepted")).toBeVisible();
   await expect(page.getByText(/open request requires 500/i)).toBeVisible();
   expect(swapRequests).toBe(0);
+});
+
+test("a spent outgoing token shows a terminal claim instead of an unfinished preparation", async ({ page }) => {
+  const keysetId = await mockCompatibleMint(page, 0, "SPENT");
+  await page.addInitScript((activeKeysetId) => {
+    const mintUrl = "http://127.0.0.1:5174";
+    localStorage.setItem(
+      `fibernuts:wallet:v2:${mintUrl}`,
+      JSON.stringify({
+        version: 2,
+        proofs: [{ amount: 1024, id: activeKeysetId, secret: "claimed-token-source", C: `02${"33".repeat(32)}` }],
+        operations: [],
+      }),
+    );
+  }, keysetId);
+  const request = new PaymentRequest(
+    undefined,
+    "spent-token-browser-test",
+    1024,
+    "rusd",
+    ["http://127.0.0.1:5174"],
+    "Claimed payment",
+    true,
+  ).toEncodedRequest();
+
+  await page.goto("/");
+  await expect(page.getByText("Mint compatible")).toBeVisible();
+  await page.locator(".desktop-nav").getByRole("button", { name: "Pay" }).click();
+  await page.getByLabel("Cashu payment request").fill(request);
+  await page.getByRole("button", { name: "Read request" }).click();
+  await page.getByRole("button", { name: "Pay 10.24 RUSD" }).click();
+  await expect(page.getByText("Awaiting claim")).toBeVisible();
+
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByText("Token spent")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "The mint reports every proof spent" })).toBeVisible();
+  await expect(page.getByText(/does not identify who claimed/i)).toBeVisible();
+  await expect(page.getByText(/bearer token is not ready/i)).toHaveCount(0);
 });
 
 test("an already-spent returned token is terminal without attempting a swap", async ({ page }) => {
@@ -484,9 +522,15 @@ test("an incoming token with an unknown keyset fails before network mutation", a
   await page.getByRole("button", { name: "Secure payment" }).click();
 
   await expect(page.getByText(/keyset ID.*known keysets/i)).toBeVisible();
-  await expect(page.getByText("Payment not accepted")).toHaveCount(0);
+  await expect(page.getByText("Payment not accepted")).toBeVisible();
   expect(stateRequests).toBe(0);
   expect(swapRequests).toBe(0);
+  const stored = await page.evaluate(() => {
+    const snapshot = JSON.parse(localStorage.getItem("fibernuts:wallet:v2:http://127.0.0.1:5174") ?? "{}");
+    return snapshot.operations[0];
+  });
+  expect(stored.state).toBe("rejected");
+  expect(stored.token).toBe(token);
 });
 
 test("incoming value reaches the balance only after fresh proofs are returned", async ({ page }) => {
@@ -737,14 +781,14 @@ test("pending outgoing proofs stay non-spendable after reload", async ({ page })
   await page.locator(".desktop-nav").getByRole("button", { name: "Activity" }).click();
   await expect(page.getByText("Pending", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /Sent payment/i }).click();
-  await expect(page.getByText("Acceptance in progress")).toBeVisible();
+  await expect(page.getByText("Claim in progress")).toBeVisible();
   await expect(page.getByText(/token value is not spendable and cannot be safely reclaimed/i)).toBeVisible();
   await expect(page.getByRole("button", { name: "Reclaim if unspent" })).toHaveCount(0);
 
   await page.reload();
   await page.locator(".desktop-nav").getByRole("button", { name: "Activity" }).click();
   await page.getByRole("button", { name: /Sent payment/i }).click();
-  await expect(page.getByText("Acceptance in progress")).toBeVisible();
+  await expect(page.getByText("Claim in progress")).toBeVisible();
   const storedState = await page.evaluate(() => {
     const stored = JSON.parse(localStorage.getItem("fibernuts:wallet:v2:http://127.0.0.1:5174") ?? "{}");
     return stored.operations[0].state;

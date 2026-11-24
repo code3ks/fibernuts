@@ -2,6 +2,7 @@ import { CheckCircle2, Plus, RefreshCw, RotateCcw } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 
 import { AmountInput, Button, Notice, ProgressSteps, QrPanel, QuickAmounts, StatusBadge } from "../components/Primitives";
+import { safeErrorMessage } from "../domain/errors";
 import type { AddCashOperation, WalletOperation } from "../domain/operations";
 import { fmt, parseAmount } from "../lib/wallet";
 
@@ -44,7 +45,7 @@ export function AddCashScreen({
       const created = await onRequest(parsed);
       setOperationId(created.id);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The mint invoice could not be created.");
+      setError(safeErrorMessage(reason, "The mint invoice could not be created."));
     } finally {
       setBusy(false);
     }
@@ -57,7 +58,7 @@ export function AddCashScreen({
     try {
       await onRefresh(operation);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The quote could not be checked.");
+      setError(safeErrorMessage(reason, "The quote could not be checked."));
     } finally {
       setBusy(false);
     }

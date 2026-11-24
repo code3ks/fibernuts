@@ -4,6 +4,7 @@ import { useState } from "react";
 import { OperationList } from "../components/OperationList";
 import { Button, CopyButton, Notice, StatusBadge } from "../components/Primitives";
 import { SettlementFacts } from "../components/SettlementFacts";
+import { safeErrorMessage } from "../domain/errors";
 import { operationGuidance, operationHasBearerSecret, presentOperation, type WalletOperation } from "../domain/operations";
 import { fmt, sumProofs } from "../lib/wallet";
 
@@ -75,7 +76,7 @@ export function OperationDetailScreen({
       else if (action === "reclaim") await onReclaim(operation);
       else await onDiscard(operation);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The operation could not be updated.");
+      setError(safeErrorMessage(reason, "The operation could not be updated."));
     } finally {
       setBusy(false);
     }

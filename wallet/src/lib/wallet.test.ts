@@ -4,6 +4,7 @@ import {
   createNewMintKeys,
   createP2PKsecret,
   createRandomSecretKey,
+  getEncodedToken,
   getPubKeyFromPrivKey,
   OutputData,
   pointFromHex,
@@ -56,6 +57,26 @@ describe("wallet amount helpers", () => {
     expect(mintQuoteIsPaid({ ...quote, state: undefined, amount_paid: 1000 } as never)).toBe(true);
     expect(mintQuoteIsPaid({ ...quote, amount_paid: 1000 } as never)).toBe(false);
     expect(mintQuoteIsPaid({ ...quote, state: "PAID", amount_paid: 0 } as never)).toBe(true);
+  });
+
+  it("reads token routing metadata before a keyset is trusted", () => {
+    const token = getEncodedToken({
+      mint: "https://mint.example",
+      unit: "rusd",
+      proofs: [{
+        amount: 8,
+        id: "00ffffffffffffff",
+        secret: "unknown-keyset-proof",
+        C: `02${"11".repeat(32)}`,
+      }] as never,
+    });
+    const wallet = new FibernutsWallet("https://mint.example");
+
+    expect(wallet.inspectTokenEnvelope(token)).toMatchObject({
+      amount: 8,
+      mint: "https://mint.example",
+      unit: "rusd",
+    });
   });
 
   it("covers the recipient's proof fee in an exact offline send", async () => {
