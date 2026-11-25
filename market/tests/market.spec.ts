@@ -195,7 +195,11 @@ async function mockServices(context: BrowserContext, shared: SharedServices) {
         inputs?: Array<{ witness?: string }>;
         outputs?: Array<{ amount: number | string; B_: string; id: string }>;
       };
-      if (body.inputs?.some((input) => typeof input.witness === "string" && input.witness.length > 0)) shared.vendorSettled = true;
+      const spendsLockedProofs = body.inputs?.some((input) => typeof input.witness === "string" && input.witness.length > 0) ?? false;
+      if (spendsLockedProofs && shared.vendorSettled) {
+        return route.fulfill({ status: 400, json: { code: 11001, detail: "Token already spent" } });
+      }
+      if (spendsLockedProofs) shared.vendorSettled = true;
       return route.fulfill({ json: { signatures: signOutputs(body.outputs) } });
     }
     if (path === "/v1/mint/quote/fiber" && request.method() === "POST") {
@@ -536,7 +540,7 @@ test("vendor and attendee complete one locked POST payment in isolated browser c
   await attendee.getByLabel("Cashu payment request").fill(request ?? "");
   await attendee.getByRole("button", { name: "Review payment" }).click();
   await expect(attendee.getByRole("heading", { name: "Coffee" })).toBeVisible();
-  await expect(attendee.getByText("Vendor-only payment")).toBeVisible();
+  await expect(attendee.getByText("Timed refund protection")).toBeVisible();
   await attendee.getByRole("button", { name: "Pay 2.50 RUSD" }).click();
   await expect(attendee.getByText("Delivered", { exact: true })).toBeVisible();
   expect(shared.payload).not.toBeNull();
@@ -550,7 +554,7 @@ test("vendor and attendee complete one locked POST payment in isolated browser c
 
   const attendeeCheck = attendee.getByRole("button", { name: "Check proof state" });
   if (await attendeeCheck.isVisible()) await attendeeCheck.click();
-  await expect(attendee.getByText("Vendor-key spend observed")).toBeVisible();
+  await expect(attendee.getByText("Token spent")).toBeVisible();
   await expect(vendor.locator("body")).not.toContainText("cashuB");
   await expect(attendee.locator("body")).not.toContainText("cashuB");
   await expectNoHorizontalOverflow(vendor);
@@ -561,6 +565,71 @@ test("vendor and attendee complete one locked POST payment in isolated browser c
   await vendorContext.close();
   await attendeeContext.close();
 });
+
+for (const viewport of viewports) {
+  test(`an attendee refunds an unspent vendor payment after locktime at ${viewport.name} width`, async ({ browser }, testInfo) => {
+    const shared: SharedServices = { payload: null, orderId: null, vendorSettled: false, acknowledged: false };
+    const vendorContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const attendeeContext = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height } });
+    const keysetId = await mockServices(vendorContext, shared);
+    await mockServices(attendeeContext, shared);
+    const vendor = await vendorContext.newPage();
+    const attendee = await attendeeContext.newPage();
+    const start = new Date("2026-11-25T08:00:00Z");
+    await vendor.clock.install({ time: start });
+    await attendee.clock.install({ time: start });
+    await seedAttendee(attendee, keysetId);
+
+    await vendor.goto("/vendor");
+    await vendor.getByRole("button", { name: "Add one Coffee" }).click();
+    await vendor.getByRole("button", { name: "Review charge" }).click();
+    await vendor.getByRole("button", { name: "Create charge" }).click();
+    await expect(vendor.locator(".charge-ticket .status")).toHaveText("Ready to scan");
+    const request = await vendor.evaluate(() => {
+      const key = Object.keys(localStorage).find((item) => item.includes(":vendor:"));
+      return key ? JSON.parse(localStorage.getItem(key) ?? "{}").orders?.[0]?.request as string | undefined : undefined;
+    });
+
+    await attendee.goto("/");
+    await attendee.getByRole("navigation", { name: "attendee navigation" }).getByRole("button", { name: "Pay" }).click();
+    await attendee.getByLabel("Cashu payment request").fill(request ?? "");
+    await attendee.getByRole("button", { name: "Review payment" }).click();
+    await expect(attendee.getByText("Timed refund protection")).toBeVisible();
+    await expectNoHorizontalOverflow(attendee);
+    await attendee.getByRole("button", { name: "Pay 2.50 RUSD" }).click();
+    await expect(attendee.getByText("Refund protected")).toBeVisible();
+    await expectNoHorizontalOverflow(attendee);
+    const balance = viewport.width >= 920
+      ? attendee.locator(".desktop-header__balance strong")
+      : attendee.locator(".mobile-header__title small");
+    await expect(balance).toContainText(viewport.width >= 920 ? "7.74 RUSD" : "7.74 RUSD ecash");
+
+    await attendee.clock.fastForward("05:01");
+    const refund = attendee.getByRole("button", { name: "Refund if unspent" });
+    await expect(refund).toBeEnabled();
+    await refund.click();
+
+    await expect(attendee.getByText("Refunded", { exact: true })).toBeVisible();
+    await expect(balance).toContainText(viewport.width >= 920 ? "10.24 RUSD" : "10.24 RUSD ecash");
+    const stored = await attendee.evaluate(() => {
+      const key = Object.keys(localStorage).find((item) => item.includes(":attendee:"));
+      const payment = key ? JSON.parse(localStorage.getItem(key) ?? "{}").payments?.[0] : undefined;
+      return payment ? {
+        state: payment.state,
+        hasToken: "token" in payment,
+        hasRefundKey: "refundPrivateKey" in payment,
+        hasRefundSwap: "refundSwap" in payment,
+      } : null;
+    });
+    expect(stored).toEqual({ state: "refunded", hasToken: false, hasRefundKey: false, hasRefundSwap: false });
+    await expect(attendee.locator("body")).not.toContainText("cashuB");
+    await expectNoHorizontalOverflow(attendee);
+    await attendee.screenshot({ path: testInfo.outputPath(`attendee-refunded-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+
+    await vendorContext.close();
+    await attendeeContext.close();
+  });
+}
 
 test("a lost delivery response resumes the identical payload after reload", async ({ browser }) => {
   const shared: SharedServices = {

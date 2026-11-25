@@ -9,6 +9,8 @@ const storedProof = {
   secret: "synthetic-storage-proof",
   C: `02${"11".repeat(32)}`,
 };
+const refundPrivateKey = "0".repeat(63) + "1";
+const refundPublicKey = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
 function deliveredPayment() {
   const orderId = "order-storage-test";
@@ -33,6 +35,16 @@ function deliveredPayment() {
     updatedAt: 1,
   };
 }
+
+const refundSwap = {
+  amount: 250,
+  fees: 0,
+  keysetId: "synthetic_keyset",
+  inputs: [storedProof],
+  sendOutputs: [],
+  keepOutputs: [],
+  unselectedProofs: [],
+};
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
@@ -98,5 +110,43 @@ describe("market storage", () => {
     }];
 
     expect(() => saveMarketSnapshot(EVENT, snapshot, storage)).toThrow(/overlap/i);
+  });
+
+  it("round-trips complete refund recovery data and rejects partial key material", () => {
+    const storage = new MemoryStorage();
+    const snapshot = emptyMarketSnapshot(EVENT, "attendee");
+    snapshot.payments = [{
+      ...deliveredPayment(),
+      state: "refunding",
+      refundPrivateKey,
+      refundPublicKey,
+      refundLocktime: 1_800_000_300,
+      refundSwap: refundSwap as unknown as typeof snapshot.payments[number]["refundSwap"],
+    }];
+
+    saveMarketSnapshot(EVENT, snapshot, storage);
+    expect(loadMarketSnapshot(EVENT, "attendee", storage).payments[0].refundSwap?.amount).toBe(250);
+
+    const partial = structuredClone(snapshot);
+    partial.payments[0].refundPublicKey = undefined;
+    expect(() => saveMarketSnapshot(EVENT, partial, storage)).toThrow(/refund key material/i);
+
+    const mismatched = structuredClone(snapshot);
+    mismatched.payments[0].refundPrivateKey = "11".repeat(32);
+    expect(() => saveMarketSnapshot(EVENT, mismatched, storage)).toThrow(/refund key material/i);
+  });
+
+  it("rejects refund keys without the bound payment request", () => {
+    const storage = new MemoryStorage();
+    const snapshot = emptyMarketSnapshot(EVENT, "attendee");
+    snapshot.payments = [{
+      ...deliveredPayment(),
+      request: undefined,
+      refundPrivateKey,
+      refundPublicKey,
+      refundLocktime: 1_800_000_300,
+    }];
+
+    expect(() => saveMarketSnapshot(EVENT, snapshot, storage)).toThrow(/refund request/i);
   });
 });

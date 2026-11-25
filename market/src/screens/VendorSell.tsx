@@ -51,7 +51,7 @@ export function VendorSell({ market, onOrder }: { market: MarketController; onOr
           </div>
           <div className="order-review__total"><span>Total</span><strong>{fmt(total)} RUSD</strong></div>
         </section>
-        <Notice tone="neutral">The payment request accepts only RUSD ecash from {new URL(EVENT.mintUrl).host} and locks proofs to this browser's vendor key.</Notice>
+        <Notice tone="neutral">The request accepts only RUSD ecash from {new URL(EVENT.mintUrl).host}. Only this browser's vendor key can spend before expiry; afterward, the attendee may request a refund if the token remains unspent.</Notice>
         {error ? <Notice tone="failed">{error}</Notice> : null}
         <div className="split-actions split-actions--confirm">
           <Button variant="secondary" onClick={() => setReviewing(false)}>Edit order</Button>

@@ -15,6 +15,8 @@ export type PaymentState =
   | "delivered"
   | "unspent"
   | "pending"
+  | "refunding"
+  | "refunded"
   | "spent"
   | "recoverable";
 
@@ -34,6 +36,10 @@ export interface AttendeePayment {
   payloadJson?: string;
   token?: string;
   swap?: StoredSwapPreview;
+  refundPrivateKey?: string;
+  refundPublicKey?: string;
+  refundLocktime?: number;
+  refundSwap?: StoredSwapPreview;
   deliveryRetryable?: boolean;
   deliveredAt?: number;
   proofStateCheckedAt?: number;
@@ -107,11 +113,24 @@ export type MarketActivity = AddCashOperation | AttendeePayment | VendorOrder | 
 
 export function paymentCanRetry(payment: AttendeePayment): boolean {
   if (!["preparing", "ready_to_deliver", "delivering", "recoverable"].includes(payment.state)) return false;
+  if (payment.refundSwap) return false;
   if (payment.deliveredAt || payment.deliveryRetryable === false) return false;
   if (payment.swap) return Boolean(payment.request && payment.deliveryUrl);
   return Boolean(payment.token && payment.payloadJson && payment.deliveryUrl);
 }
 
 export function paymentCanCheck(payment: AttendeePayment): boolean {
-  return Boolean(payment.token) && ["delivered", "unspent", "pending", "recoverable"].includes(payment.state);
+  return Boolean(payment.token) && !payment.refundSwap && ["delivered", "unspent", "pending", "recoverable"].includes(payment.state);
+}
+
+export function paymentHasRefundPath(payment: AttendeePayment): boolean {
+  return Boolean(
+    payment.token && payment.refundPrivateKey && payment.refundPublicKey &&
+    Number.isSafeInteger(payment.refundLocktime) && (payment.refundLocktime ?? 0) > 0,
+  );
+}
+
+export function paymentCanRefund(payment: AttendeePayment, now = Date.now()): boolean {
+  if (!paymentHasRefundPath(payment) || now < (payment.refundLocktime ?? 0) * 1000) return false;
+  return ["delivered", "unspent", "pending", "recoverable", "refunding"].includes(payment.state);
 }

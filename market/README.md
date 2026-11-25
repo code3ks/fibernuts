@@ -2,11 +2,16 @@
 
 This is the event application built on the FiberNuts protocol. An attendee spends RUSD Cashu ecash
 from a browser wallet, a vendor receives a NUT-18 POST payment locked to the vendor's ephemeral
-P2PK key, and the vendor swaps it for fresh proofs before the order is shown as paid. Fiber remains
-the add-cash and cash-out rail at the edge of the application.
+P2PK key, and the vendor swaps it for fresh proofs before the order is shown as paid. Each new
+payment also carries a one-time attendee refund key that becomes valid at the request expiry. After
+expiry either side may attempt the swap, but only the mint's first accepted proof spend can credit
+a balance. Fiber remains the add-cash and cash-out rail at the edge of the application.
 
 The application is testnet-only. Browser storage contains bearer proofs and recovery material; use
 separate browser profiles for attendee and vendor roles and never treat the demo balance as money.
+The mint's clock and proof state are authoritative; the browser timer only enables the attendee's
+refund action. A refund returns the payment amount after fresh proofs persist, not the outgoing
+Cashu proof fee.
 
 ## Local development
 
