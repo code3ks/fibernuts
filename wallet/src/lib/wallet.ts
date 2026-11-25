@@ -496,6 +496,31 @@ export class FibernutsWallet {
     });
   }
 
+  refundPublicKeyForToken(token: string, vendorPublicKey: string, locktime: number): string | null {
+    if (!Number.isSafeInteger(locktime) || locktime <= 0) return null;
+    const expectedVendor = vendorPublicKey.toLowerCase();
+    let expectedRefund: string | undefined;
+    for (const proof of this.inspectToken(token).proofs) {
+      try {
+        const [kind, condition] = parseP2PKSecret(proof.secret);
+        const tags = condition.tags ?? [];
+        if (kind !== "P2PK" || condition.data.toLowerCase() !== expectedVendor || tags.length !== 2) return null;
+        const locktimeTag = tags.find((tag) => tag[0] === "locktime");
+        const refundTag = tags.find((tag) => tag[0] === "refund");
+        if (
+          !locktimeTag || locktimeTag.length !== 2 || locktimeTag[1] !== String(locktime) ||
+          !refundTag || refundTag.length !== 2 || !/^(02|03)[a-f0-9]{64}$/i.test(refundTag[1])
+        ) return null;
+        const refundPublicKey = refundTag[1].toLowerCase();
+        if (refundPublicKey === expectedVendor || (expectedRefund && refundPublicKey !== expectedRefund)) return null;
+        expectedRefund = refundPublicKey;
+      } catch {
+        return null;
+      }
+    }
+    return expectedRefund ?? null;
+  }
+
   async completePreparedReceive(swap: StoredSwapPreview): Promise<Proof[]> {
     try {
       const result = await this.wallet.completeSwap(deserializeSwapPreview(swap));
@@ -505,6 +530,11 @@ export class FibernutsWallet {
       if (restored) return restored.keep;
       throw reason;
     }
+  }
+
+  async recoverPreparedReceive(swap: StoredSwapPreview): Promise<Proof[] | null> {
+    const restored = await this.tryRestoreSwap(swap);
+    return restored?.keep ?? null;
   }
 
   encodeProofs(proofs: Proof[]): string {

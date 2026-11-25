@@ -287,7 +287,7 @@ failure, timeout, retry, and panic/error formatting paths.
 | Outgoing token redisplay/reclaim | Reload and pending-proof coverage in reference browser flows | Multi-tab and live safe-reclaim evidence |
 | Hosted tenant and remote signer | Not shipped | Pinned upstream adapter plus public-testnet security gate |
 | Browser wallet funding | Not shipped | JoyID/CCC witness-only external funding with interruption tests |
-| NUT-11 refund | Not shipped | Race-safe implementation and recovery evidence |
+| NUT-11 refund | Browser flow has early-refund refusal, both winner orders, concurrent-race, reload/NUT-09 recovery, and replay coverage | Add public-testnet mint-refusal and interruption evidence |
 | Mainnet validation | Not authorized | All conditions in `docs/mainnet-validation.md` pass |
 
 ## What this model does not prove

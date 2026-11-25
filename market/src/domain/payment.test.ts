@@ -4,7 +4,13 @@ import { describe, expect, it } from "vitest";
 import { createPaymentRequest } from "@wallet-lib/payment-request";
 
 import { EVENT } from "../event/manifest";
-import { createVendorRequest, validateEventPaymentRequest } from "./payment";
+import {
+  attendeeRefundKeysMatch,
+  createAttendeeRefundLock,
+  createVendorRequest,
+  validateEventPaymentRequest,
+  validateStoredEventPaymentRequest,
+} from "./payment";
 
 describe("event payment requests", () => {
   it("creates a single-use request locked to a persisted vendor key", async () => {
@@ -17,6 +23,23 @@ describe("event payment requests", () => {
     expect(validated.orderId).toBe(created.orderId);
     expect(validated.vendor.id).toBe("block-cafe");
     expect(validated.lockPublicKey).toBe(created.publicKey);
+    expect(validated.refundLocktime).toBe(created.expiresAt);
+
+    const refund = createAttendeeRefundLock(validated);
+    expect(attendeeRefundKeysMatch(refund.privateKey, refund.publicKey)).toBe(true);
+    expect(refund.options).toEqual({
+      pubkey: created.publicKey,
+      locktime: created.expiresAt,
+      refundKeys: [refund.publicKey],
+    });
+  });
+
+  it("validates an expired stored request only against its exact recorded expiry", async () => {
+    const created = await createVendorRequest(EVENT, EVENT.vendors[0], 250, "Block Cafe - Coffee", 1_800_000_000);
+
+    expect(() => validateEventPaymentRequest(created.request.encoded, EVENT, 1000, created.expiresAt + 1)).toThrow(/expired/i);
+    expect(validateStoredEventPaymentRequest(created.request.encoded, EVENT, 1000, created.expiresAt).orderId).toBe(created.orderId);
+    expect(() => validateStoredEventPaymentRequest(created.request.encoded, EVENT, 1000, created.expiresAt + 1)).toThrow(/recorded expiry/i);
   });
 
   it("rejects an unapproved relay and a request without the exact lock", () => {
@@ -39,7 +62,7 @@ describe("event payment requests", () => {
         tags: [["event_id", EVENT.id], ["vendor_id", "block-cafe"], ["expires_at", "1800000300"]],
       }],
     });
-    expect(() => validateEventPaymentRequest(relayedButUnlocked.encoded, EVENT, 1000, 1_800_000_001)).toThrow(/vendor-only lock/i);
+    expect(() => validateEventPaymentRequest(relayedButUnlocked.encoded, EVENT, 1000, 1_800_000_001)).toThrow(/required vendor lock/i);
   });
 
   it("rejects requests that do not bind payment to the configured mint", () => {

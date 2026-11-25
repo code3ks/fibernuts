@@ -76,6 +76,34 @@ per-network limits, and a global daily ceiling bound the operator's testnet liqu
 are stored as keyed hashes and removed after retention. Aggregate claim counts measure trial use
 without linking a claim to later Cashu transfers.
 
+### Vendor payment with timed attendee refund
+
+The Community Market uses NUT-18 delivery and NUT-11 spending conditions for a one-scan vendor
+payment:
+
+1. The vendor creates a single-use request containing the exact amount, mint, RUSD unit, relay
+   target, order expiry, and an ephemeral vendor P2PK public key. The NUT-11 locktime equals the
+   request expiry.
+2. During review, the attendee generates a one-time refund keypair. The outgoing proofs use the
+   vendor key as the main spending key and the attendee key as the sole refund key after that exact
+   locktime.
+3. Before asking the mint to create the token, the attendee persists the prepared outgoing swap,
+   request, refund keypair, and locktime. After the mint responds, one local commit stores the
+   encoded token, exact delivery payload, retained proofs, and resulting spendable balance before
+   delivery. The relay receives the bearer payload but neither spending key.
+4. Before locktime, only the vendor signature is valid. At or after locktime, the attendee refund
+   signature is also valid, while the vendor key remains valid. The mint's first accepted atomic
+   swap wins; expiry does not revoke the vendor key.
+5. The winning browser credits balance only after fresh proofs and the terminal operation state are
+   persisted together. The losing browser records spent or recoverable state without crediting
+   value.
+
+The browser clock only controls when the refund action becomes available locally. The mint's clock
+and proof state are authoritative. An interrupted swap reuses the persisted outputs and NUT-09
+restoration; a timeout or unavailable restoration remains ambiguous. A refund returns the payment
+amount, not the Cashu input fee already paid to construct the outgoing token. New payments reject
+older vendor-only requests that do not encode this refund lock.
+
 ### Melt (wallet spends ecash to a Fiber invoice)
 
 1. Wallet asks for a melt quote: `POST /v1/melt/quote/fiber`, carrying a Fiber invoice.

@@ -77,7 +77,7 @@ export function VendorOrder({ market, orderId, onNewSale }: { market: MarketCont
         {order.state === "settled" ? <div className="settlement-stamp"><CheckCircle2 size={22} aria-hidden="true" /> Fresh proofs stored</div> : null}
       </section>
       <Notice tone={presentation.tone} title={presentation.label}>{presentation.detail}</Notice>
-      {order.state === "awaiting_payment" ? <Notice tone="neutral">The QR contains a public payment request, not wallet proofs. The returned payment is locked to this order's vendor key.</Notice> : null}
+      {order.state === "awaiting_payment" ? <Notice tone="neutral">The QR contains a public payment request, not wallet proofs. Before expiry only this vendor key can spend. After expiry, an attendee refund may race this claim; the first mint swap wins.</Notice> : null}
       {order.error && order.state !== "recoverable" && order.state !== "rejected" ? <Notice tone="recoverable">{order.error}</Notice> : null}
       {error ? <Notice tone="failed">{error}</Notice> : null}
       <div className="split-actions">

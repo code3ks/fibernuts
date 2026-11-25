@@ -74,6 +74,7 @@ export interface MarketController {
   confirmPayment: (review: PaymentReview) => Promise<AttendeePayment>;
   retryPaymentDelivery: (payment: AttendeePayment) => Promise<AttendeePayment>;
   checkPayment: (payment: AttendeePayment) => Promise<AttendeePayment>;
+  refundPayment: (payment: AttendeePayment) => Promise<AttendeePayment>;
   createOrder: (items: OrderItem[]) => Promise<VendorOrder>;
   pollOrder: (order: VendorOrder) => Promise<VendorOrder>;
   cancelOrder: (order: VendorOrder) => Promise<VendorOrder>;
@@ -273,6 +274,7 @@ export function useMarket(role: MarketRole): MarketController {
   const confirmPayment = useCallback((review: PaymentReview) => runLocked((active) => active.confirmPayment(review)), [runLocked]);
   const retryPaymentDelivery = useCallback((payment: AttendeePayment) => runLocked((active) => active.deliverStoredPayment(payment)), [runLocked]);
   const checkPayment = useCallback((payment: AttendeePayment) => runLocked((active) => active.checkPayment(payment)), [runLocked]);
+  const refundPayment = useCallback((payment: AttendeePayment) => runLocked((active) => active.refundPayment(payment)), [runLocked]);
   const createOrder = useCallback((items: OrderItem[]) => runLocked((active) => active.createOrder(items)), [runLocked]);
   const pollOrder = useCallback((order: VendorOrder) => runLocked(async (active) => {
     if (order.state === "cancelling") return active.cancelOrder(order);
@@ -327,6 +329,13 @@ export function useMarket(role: MarketRole): MarketController {
         void pollOrder(order).catch(() => undefined);
         return;
       }
+      const refund = current.payments.find((item) => (
+        Boolean(item.refundSwap) && ["refunding", "recoverable"].includes(item.state)
+      ));
+      if (role === "attendee" && refund) {
+        void refundPayment(refund).catch(() => undefined);
+        return;
+      }
       const payment = current.payments.find((item) => ["delivered", "unspent", "pending"].includes(item.state));
       if (role === "attendee" && payment) {
         void checkPayment(payment).catch(() => undefined);
@@ -348,7 +357,7 @@ export function useMarket(role: MarketRole): MarketController {
       window.clearInterval(interval);
       window.removeEventListener("focus", resume);
     };
-  }, [checkPayment, pollOrder, refreshAddCash, refreshCashOut, role, runtime, status, storageError]);
+  }, [checkPayment, pollOrder, refreshAddCash, refreshCashOut, refundPayment, role, runtime, status, storageError]);
 
   return {
     role,
@@ -370,6 +379,7 @@ export function useMarket(role: MarketRole): MarketController {
     confirmPayment,
     retryPaymentDelivery,
     checkPayment,
+    refundPayment,
     createOrder,
     pollOrder,
     cancelOrder,

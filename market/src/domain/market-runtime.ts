@@ -24,8 +24,11 @@ import {
 
 import type { EventManifest, VendorManifest } from "../event/manifest";
 import {
+  attendeeRefundKeysMatch,
+  createAttendeeRefundLock,
   createPaymentPayload,
   createVendorRequest,
+  validateStoredEventPaymentRequest,
   validateEventPaymentRequest,
   type CreatedVendorRequest,
   type ValidatedEventRequest,
@@ -51,8 +54,10 @@ export interface MarketWallet {
   inspectToken(token: string): { amount: number; mint: string; unit: string; proofs: Proof[]; memo?: string };
   encodeProofs(proofs: Proof[]): string;
   tokenIsLockedTo(token: string, publicKey: string): boolean;
+  refundPublicKeyForToken(token: string, vendorPublicKey: string, locktime: number): string | null;
   prepareReceive(token: string, privateKey?: string): Promise<StoredSwapPreview>;
   completePreparedReceive(swap: StoredSwapPreview): Promise<Proof[]>;
+  recoverPreparedReceive(swap: StoredSwapPreview): Promise<Proof[] | null>;
   checkTokenState(token: string): Promise<TokenSpendState>;
   requestMint(amount: number): Promise<MintQuote>;
   requestLockedMint(amount: number): Promise<LockedMintQuote>;
@@ -94,6 +99,9 @@ export interface PaymentReview {
   debit: number;
   fee: number;
   proofFingerprint: string;
+  refundPrivateKey: string;
+  refundPublicKey: string;
+  refundLocktime: number;
 }
 
 export interface CashOutReview {
@@ -280,12 +288,11 @@ export class MarketRuntime {
     this.assertRole("attendee");
     const current = this.getSnapshot();
     const balance = sumProofs(current.proofs);
-    const validated = validateEventPaymentRequest(encoded, this.manifest, balance);
+    const validated = validateEventPaymentRequest(encoded, this.manifest, balance, Math.floor(this.now() / 1000));
     const existing = current.payments.find((payment) => payment.orderId === validated.orderId);
     if (existing) throw new Error("This single-use order already has a payment. Open Activity to inspect it.");
-    const lock = paymentRequestLock(validated.request);
-    if (!lock) throw new Error("The vendor-only payment lock is unavailable.");
-    const prepared = await this.wallet.prepareSend(validated.request.amount, current.proofs, lock);
+    const refundLock = createAttendeeRefundLock(validated);
+    const prepared = await this.wallet.prepareSend(validated.request.amount, current.proofs, refundLock.options);
     if (prepared.mode !== "swap") throw new Error("Locked market payments must use a prepared swap.");
     return {
       validated,
@@ -294,34 +301,59 @@ export class MarketRuntime {
       debit: prepared.debit,
       fee: prepared.fee,
       proofFingerprint: proofFingerprint(current.proofs),
+      refundPrivateKey: refundLock.privateKey,
+      refundPublicKey: refundLock.publicKey,
+      refundLocktime: refundLock.locktime,
     };
   }
 
   async confirmPayment(review: PaymentReview): Promise<AttendeePayment> {
     this.assertRole("attendee");
     const current = this.getSnapshot();
-    if (current.payments.some((payment) => payment.orderId === review.validated.orderId)) {
-      throw new Error("This single-use order already has a payment. Open Activity to inspect it.");
-    }
     if (proofFingerprint(current.proofs) !== review.proofFingerprint) {
       throw new Error("The ecash balance changed. Review the recalculated debit before paying.");
     }
-    validateEventPaymentRequest(review.validated.request.encoded, this.manifest, sumProofs(current.proofs));
+    const balance = sumProofs(current.proofs);
+    const validated = validateEventPaymentRequest(
+      review.validated.request.encoded,
+      this.manifest,
+      balance,
+      Math.floor(this.now() / 1000),
+    );
+    if (
+      current.payments.some((payment) => payment.orderId === validated.orderId) ||
+      validated.orderId !== review.validated.orderId ||
+      validated.vendor.id !== review.validated.vendor.id ||
+      validated.deliveryUrl !== review.validated.deliveryUrl ||
+      validated.request.amount !== review.validated.request.amount ||
+      validated.request.description !== review.validated.request.description ||
+      review.balance !== balance ||
+      validated.refundLocktime !== review.refundLocktime ||
+      !attendeeRefundKeysMatch(review.refundPrivateKey, review.refundPublicKey) ||
+      review.prepared.mode !== "swap" ||
+      review.prepared.swap.amount !== validated.request.amount ||
+      review.prepared.debit !== review.debit ||
+      review.prepared.fee !== review.fee ||
+      review.debit !== validated.request.amount + review.fee
+    ) throw new Error("The reviewed payment no longer matches this payment request.");
     const timestamp = this.now();
     let payment: AttendeePayment = {
       id: createOperationId(),
       kind: "event_payment",
-      orderId: review.validated.orderId,
+      orderId: validated.orderId,
       state: "preparing",
-      amount: review.validated.request.amount,
+      amount: validated.request.amount,
       fee: review.fee,
       unit: "rusd",
       mintUrl: this.manifest.mintUrl,
-      vendorName: review.validated.vendor.name,
-      description: review.validated.request.description,
-      request: review.validated.request.encoded,
-      deliveryUrl: review.validated.deliveryUrl,
+      vendorName: validated.vendor.name,
+      description: validated.request.description,
+      request: validated.request.encoded,
+      deliveryUrl: validated.deliveryUrl,
       swap: review.prepared.swap,
+      refundPrivateKey: review.refundPrivateKey,
+      refundPublicKey: review.refundPublicKey,
+      refundLocktime: review.refundLocktime,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -343,7 +375,13 @@ export class MarketRuntime {
     if (!payment.swap || !payment.request || !payment.deliveryUrl) {
       throw new Error("Stored payment preparation data is incomplete.");
     }
-    const request = validateEventPaymentRequest(payment.request, this.manifest, Number.MAX_SAFE_INTEGER);
+    if (!payment.refundLocktime) throw new Error("Stored payment refund timing is unavailable.");
+    const request = validateStoredEventPaymentRequest(
+      payment.request,
+      this.manifest,
+      Number.MAX_SAFE_INTEGER,
+      payment.refundLocktime,
+    );
     const result = await this.wallet.completePreparedSend(payment.swap);
     const payloadJson = JSON.stringify(createPaymentPayload(this.wallet, result.token, request.request));
     const ready: AttendeePayment = {
@@ -412,8 +450,13 @@ export class MarketRuntime {
           state: "spent",
           token: undefined,
           payloadJson: undefined,
+          swap: undefined,
           request: undefined,
           deliveryUrl: undefined,
+          refundPrivateKey: undefined,
+          refundPublicKey: undefined,
+          refundLocktime: undefined,
+          refundSwap: undefined,
           deliveryRetryable: undefined,
           proofStateCheckedAt: this.now(),
           updatedAt: this.now(),
@@ -451,6 +494,156 @@ export class MarketRuntime {
         state: "recoverable",
         updatedAt: this.now(),
         error: `Proof state is unavailable. ${describe(reason)}`,
+      });
+    }
+  }
+
+  private commitRefunded(payment: AttendeePayment, proofs: Proof[]): AttendeePayment {
+    if (sumProofs(proofs) !== payment.amount) {
+      return this.commitPayment({
+        ...payment,
+        state: "recoverable",
+        updatedAt: this.now(),
+        error: "The mint returned a refund amount that does not match the original payment. Keep this recovery record.",
+      });
+    }
+    const refunded = this.commitPayment({
+      ...payment,
+      state: "refunded",
+      token: undefined,
+      payloadJson: undefined,
+      swap: undefined,
+      request: undefined,
+      deliveryUrl: undefined,
+      refundPrivateKey: undefined,
+      refundPublicKey: undefined,
+      refundLocktime: undefined,
+      refundSwap: undefined,
+      deliveryRetryable: undefined,
+      proofStateCheckedAt: this.now(),
+      updatedAt: this.now(),
+      error: undefined,
+    }, [...this.getSnapshot().proofs, ...proofs]);
+    this.notify(`${this.wallet.ticker} payment refunded with fresh proofs`);
+    return refunded;
+  }
+
+  async refundPayment(input: AttendeePayment): Promise<AttendeePayment> {
+    this.assertRole("attendee");
+    let payment = this.getSnapshot().payments.find((item) => item.id === input.id) ?? input;
+    if (["refunded", "spent"].includes(payment.state)) return payment;
+    if (!payment.token || !payment.request || !payment.refundPrivateKey || !payment.refundPublicKey || !payment.refundLocktime) {
+      throw new Error("This payment has no complete attendee refund key. No proofs were changed.");
+    }
+    const token = payment.token;
+    if (this.now() < payment.refundLocktime * 1000) {
+      throw new Error("The refund locktime has not been reached. The vendor remains the only authorized spender.");
+    }
+    const refundPublicKey = this.wallet.refundPublicKeyForToken(
+      token,
+      validateStoredEventPaymentRequest(
+        payment.request,
+        this.manifest,
+        Number.MAX_SAFE_INTEGER,
+        payment.refundLocktime,
+      ).lockPublicKey,
+      payment.refundLocktime,
+    );
+    if (refundPublicKey !== payment.refundPublicKey.toLowerCase()) {
+      return this.commitPayment({
+        ...payment,
+        state: "recoverable",
+        updatedAt: this.now(),
+        error: "The stored token does not match its attendee refund key and locktime. No refund was attempted.",
+      });
+    }
+
+    try {
+      const proofState = await this.wallet.checkTokenState(token);
+      if (proofState === "spent") {
+        if (payment.refundSwap) {
+          const recovered = await this.wallet.recoverPreparedReceive(payment.refundSwap);
+          if (recovered) return this.commitRefunded(payment, recovered);
+          return this.commitPayment({
+            ...payment,
+            state: "recoverable",
+            proofStateCheckedAt: this.now(),
+            updatedAt: this.now(),
+            error: "The proofs are spent, but the prepared refund outputs could not be recovered. Keep this record; the winner is not yet established locally.",
+          });
+        }
+        return this.commitPayment({
+          ...payment,
+          state: "spent",
+          token: undefined,
+          payloadJson: undefined,
+          swap: undefined,
+          request: undefined,
+          deliveryUrl: undefined,
+          refundPrivateKey: undefined,
+          refundPublicKey: undefined,
+          refundLocktime: undefined,
+          deliveryRetryable: undefined,
+          proofStateCheckedAt: this.now(),
+          updatedAt: this.now(),
+          error: undefined,
+        });
+      }
+      if (proofState === "pending") {
+        return this.commitPayment({
+          ...payment,
+          state: "pending",
+          proofStateCheckedAt: this.now(),
+          updatedAt: this.now(),
+          error: "The mint reports the payment proofs pending. Refund and vendor settlement remain unresolved.",
+        });
+      }
+      if (proofState === "mixed") {
+        return this.commitPayment({
+          ...payment,
+          state: "recoverable",
+          proofStateCheckedAt: this.now(),
+          updatedAt: this.now(),
+          error: "The payment proofs have conflicting states. No refund was credited.",
+        });
+      }
+      if (!payment.refundSwap) {
+        const refundSwap = await this.wallet.prepareReceive(token, payment.refundPrivateKey);
+        if (refundSwap.amount !== payment.amount) {
+          return this.commitPayment({
+            ...payment,
+            state: "recoverable",
+            updatedAt: this.now(),
+            error: "The prepared refund amount does not equal the original payment.",
+          });
+        }
+        payment = this.commitPayment({
+          ...payment,
+          state: "refunding",
+          refundSwap,
+          proofStateCheckedAt: this.now(),
+          updatedAt: this.now(),
+          error: undefined,
+        });
+      }
+      if (!payment.refundSwap) throw new Error("Prepared refund recovery data is unavailable.");
+      const proofs = await this.wallet.completePreparedReceive(payment.refundSwap);
+      return this.commitRefunded(payment, proofs);
+    } catch (reason) {
+      let detail = "The same stored refund can be retried.";
+      try {
+        const state = await this.wallet.checkTokenState(token);
+        if (state === "spent") detail = "The proofs are spent, but this browser could not establish whether the refund or vendor settlement won.";
+        else if (state === "pending") detail = "The mint reports the proofs pending; no refund has been credited.";
+        else if (state === "mixed") detail = "The proofs have conflicting states; no refund has been credited.";
+      } catch {
+        detail = "Proof state is unavailable; no refund has been credited.";
+      }
+      return this.commitPayment({
+        ...payment,
+        state: "recoverable",
+        updatedAt: this.now(),
+        error: `${detail} ${describe(reason)}`,
       });
     }
   }
@@ -519,7 +712,12 @@ export class MarketRuntime {
       writeCapability: order.writeCapability,
       deliveryUrl: order.deliveryUrl,
       expiresAt: order.expiresAt,
-      request: validateEventPaymentRequest(order.request, this.manifest, Number.MAX_SAFE_INTEGER).request,
+      request: validateStoredEventPaymentRequest(
+        order.request,
+        this.manifest,
+        Number.MAX_SAFE_INTEGER,
+        order.expiresAt,
+      ).request,
       requestDigest: order.requestDigest,
     };
   }
@@ -541,6 +739,7 @@ export class MarketRuntime {
     if (order.state === "settled" && !order.relayAcknowledged && order.readCapability) {
       return this.acknowledgeSettledOrder(order);
     }
+    if (["settled", "cancelled", "expired", "rejected"].includes(order.state)) return order;
     if (order.incomingToken || order.incomingSwap) return this.settleOrder(order);
     if (!order.readCapability) throw new Error("The stored order has no private inbox capability.");
     const readCapability = order.readCapability;
@@ -587,10 +786,57 @@ export class MarketRuntime {
     }
   }
 
+  private commitSettledOrder(order: VendorOrder, proofs: Proof[]): VendorOrder {
+    if (sumProofs(proofs) !== order.amount) {
+      return this.commitOrder({
+        ...order,
+        state: "recoverable",
+        updatedAt: this.now(),
+        error: "The mint returned a vendor settlement amount that does not match the order total.",
+      });
+    }
+    const settled = this.commitOrder({
+      ...order,
+      state: "settled",
+      request: undefined,
+      requestDigest: undefined,
+      deliveryUrl: undefined,
+      writeCapability: undefined,
+      readCapability: order.relayAcknowledged ? undefined : order.readCapability,
+      privateKey: undefined,
+      incomingToken: undefined,
+      incomingSwap: undefined,
+      updatedAt: this.now(),
+      error: undefined,
+    }, [...this.getSnapshot().proofs, ...proofs]);
+    this.notify(`${this.wallet.ticker} payment settled with fresh proofs`);
+    return settled;
+  }
+
   async settleOrder(input: VendorOrder): Promise<VendorOrder> {
     this.assertRole("vendor");
     let order = this.getSnapshot().orders.find((item) => item.id === input.id) ?? input;
+    if (["settled", "cancelled", "expired", "rejected"].includes(order.state)) return order;
     try {
+      if (order.incomingSwap && order.incomingToken) {
+        const state = await this.wallet.checkTokenState(order.incomingToken);
+        if (state === "spent") {
+          const recovered = await this.wallet.recoverPreparedReceive(order.incomingSwap);
+          if (recovered) return this.commitSettledOrder(order, recovered);
+          return this.commitOrder({
+            ...order,
+            state: "recoverable",
+            updatedAt: this.now(),
+            error: "The proofs are spent, but the prepared vendor outputs could not be recovered. Keep this order; the winning path is not established locally.",
+          });
+        }
+        if (state === "pending") {
+          return this.commitOrder({ ...order, state: "recoverable", updatedAt: this.now(), error: "The mint reports that the delivered proofs are pending." });
+        }
+        if (state === "mixed") {
+          return this.commitOrder({ ...order, state: "rejected", updatedAt: this.now(), error: "The delivered proofs have conflicting states." });
+        }
+      }
       if (!order.incomingSwap) {
         if (!order.incomingToken || !order.privateKey || !order.publicKey) {
           throw new Error("Stored vendor settlement data is incomplete.");
@@ -609,8 +855,14 @@ export class MarketRuntime {
           normalizeMintUrl(inspected.mint) !== normalizeMintUrl(this.manifest.mintUrl) ||
           inspected.unit.toLowerCase() !== "rusd" || inspected.amount !== order.amount
         ) return this.commitOrder({ ...order, state: "rejected", updatedAt: this.now(), error: "The delivered token does not match the order amount, mint, and unit exactly." });
-        if (!this.wallet.tokenIsLockedTo(incomingToken, publicKey)) {
-          return this.commitOrder({ ...order, state: "rejected", updatedAt: this.now(), error: "The delivered proofs are not locked exclusively to this vendor key." });
+        const request = order.request
+          ? validateStoredEventPaymentRequest(order.request, this.manifest, Number.MAX_SAFE_INTEGER, order.expiresAt)
+          : undefined;
+        const validLock = request?.refundLocktime
+          ? Boolean(this.wallet.refundPublicKeyForToken(incomingToken, publicKey, request.refundLocktime))
+          : this.wallet.tokenIsLockedTo(incomingToken, publicKey);
+        if (!validLock) {
+          return this.commitOrder({ ...order, state: "rejected", updatedAt: this.now(), error: "The delivered proofs do not match this order's exact vendor and attendee-refund lock." });
         }
         const state = await this.wallet.checkTokenState(incomingToken);
         if (state === "spent") {
@@ -630,22 +882,7 @@ export class MarketRuntime {
       }
       if (!order.incomingSwap) throw new Error("Prepared settlement recovery data is unavailable.");
       const proofs = await this.wallet.completePreparedReceive(order.incomingSwap);
-      const settled = this.commitOrder({
-        ...order,
-        state: "settled",
-        request: undefined,
-        requestDigest: undefined,
-        deliveryUrl: undefined,
-        writeCapability: undefined,
-        readCapability: order.relayAcknowledged ? undefined : order.readCapability,
-        privateKey: undefined,
-        incomingToken: undefined,
-        incomingSwap: undefined,
-        updatedAt: this.now(),
-        error: undefined,
-      }, [...this.getSnapshot().proofs, ...proofs]);
-      this.notify(`${this.wallet.ticker} payment settled with fresh proofs`);
-      return settled;
+      return this.commitSettledOrder(order, proofs);
     } catch (reason) {
       return this.commitOrder({ ...order, state: "recoverable", updatedAt: this.now(), error: describe(reason) });
     }

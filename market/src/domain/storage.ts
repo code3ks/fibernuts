@@ -16,6 +16,7 @@ import { normalizeMintUrl } from "@wallet-lib/payment-request";
 import { units } from "@wallet-lib/wallet";
 
 import type { EventManifest } from "../event/manifest";
+import { attendeeRefundKeysMatch } from "./payment";
 import type { AttendeePayment, MarketRole, MarketSnapshot, OrderItem, VendorOrder } from "./types";
 
 export class MarketStorageError extends Error {
@@ -47,7 +48,7 @@ export function emptyMarketSnapshot(manifest: EventManifest, role: MarketRole): 
 type StoredRecord = Record<string, unknown>;
 
 const ADD_STATES = new Set(["awaiting_payment", "payment_observed", "issuing", "settled", "expired", "recoverable", "failed"]);
-const PAYMENT_STATES = new Set(["preparing", "ready_to_deliver", "delivering", "delivered", "unspent", "pending", "spent", "recoverable"]);
+const PAYMENT_STATES = new Set(["preparing", "ready_to_deliver", "delivering", "delivered", "unspent", "pending", "refunding", "refunded", "spent", "recoverable"]);
 const ORDER_STATES = new Set(["registering", "awaiting_payment", "cancelling", "payload_received", "validating", "swapping", "settled", "cancelled", "expired", "rejected", "recoverable"]);
 const CASH_OUT_STATES = new Set(["dispatching", "pending", "paid", "failed", "unknown"]);
 const QUOTE_STATES = new Set(["UNPAID", "PENDING", "PAID"]);
@@ -234,7 +235,7 @@ function validatePayloadJson(value: string, payment: { orderId: string }, manife
 function normalizePayment(value: unknown, manifest: EventManifest): AttendeePayment {
   const label = "attendee payment";
   const raw = record(value, label);
-  exactKeys(raw, ["id", "kind", "orderId", "state", "amount", "fee", "unit", "mintUrl", "vendorName", "description", "createdAt", "updatedAt"], ["request", "deliveryUrl", "payloadJson", "token", "swap", "deliveryRetryable", "deliveredAt", "proofStateCheckedAt", "error"], label);
+  exactKeys(raw, ["id", "kind", "orderId", "state", "amount", "fee", "unit", "mintUrl", "vendorName", "description", "createdAt", "updatedAt"], ["request", "deliveryUrl", "payloadJson", "token", "swap", "refundPrivateKey", "refundPublicKey", "refundLocktime", "refundSwap", "deliveryRetryable", "deliveredAt", "proofStateCheckedAt", "error"], label);
   assertBase(raw, "event_payment", manifest, label);
   const state = oneOf(raw.state, PAYMENT_STATES, `${label} state`) as AttendeePayment["state"];
   const payment: AttendeePayment = {
@@ -249,19 +250,36 @@ function normalizePayment(value: unknown, manifest: EventManifest): AttendeePaym
     payloadJson: optionalText(raw.payloadJson, `${label} payload`),
     token: optionalText(raw.token, `${label} token`, /^cashu[AB]/i),
     swap: optionalSwap(raw.swap, `${label} swap`),
+    refundPrivateKey: optionalText(raw.refundPrivateKey, `${label} refund private key`, PRIVATE_KEY),
+    refundPublicKey: optionalText(raw.refundPublicKey, `${label} refund public key`, PUBLIC_KEY),
+    refundLocktime: optionalInteger(raw.refundLocktime, `${label} refund locktime`, 1),
+    refundSwap: optionalSwap(raw.refundSwap, `${label} refund swap`),
     deliveryRetryable: optionalBoolean(raw.deliveryRetryable, `${label} retry flag`),
     deliveredAt: optionalInteger(raw.deliveredAt, `${label} delivery time`, 1),
     proofStateCheckedAt: optionalInteger(raw.proofStateCheckedAt, `${label} proof-state time`),
   };
   if (payment.deliveryUrl) assertDeliveryUrl(payment.deliveryUrl, manifest, `${label} delivery URL`);
   if (payment.payloadJson) validatePayloadJson(payment.payloadJson, payment, manifest);
+  const refundFieldCount = [payment.refundPrivateKey, payment.refundPublicKey, payment.refundLocktime]
+    .filter((value) => value !== undefined).length;
+  if (refundFieldCount !== 0 && refundFieldCount !== 3) throw malformed(`${label} refund key material`);
+  if (refundFieldCount === 3 && !payment.request) throw malformed(`${label} refund request`);
+  if (
+    refundFieldCount === 3 &&
+    !attendeeRefundKeysMatch(payment.refundPrivateKey!, payment.refundPublicKey!)
+  ) throw malformed(`${label} refund key material`);
   const completeDelivery = Boolean(payment.token && payment.payloadJson && payment.deliveryUrl);
   if (state === "preparing" && !(payment.swap && payment.request && payment.deliveryUrl)) throw malformed(label);
-  if (["ready_to_deliver", "delivering", "delivered", "unspent", "pending"].includes(state) && !completeDelivery) throw malformed(label);
+  if (["ready_to_deliver", "delivering", "delivered", "unspent", "pending", "refunding"].includes(state) && !completeDelivery) throw malformed(label);
   if (state === "recoverable" && !payment.swap && !completeDelivery) throw malformed(label);
-  if (state === "spent" && (payment.token || payment.payloadJson || payment.swap || payment.request || payment.deliveryUrl)) throw malformed(label);
+  if (payment.refundSwap && (!completeDelivery || refundFieldCount !== 3)) throw malformed(`${label} refund recovery`);
+  if (state === "refunding" && !payment.refundSwap) throw malformed(`${label} refund recovery`);
+  if (["spent", "refunded"].includes(state) && (
+    payment.token || payment.payloadJson || payment.swap || payment.request || payment.deliveryUrl ||
+    payment.refundPrivateKey || payment.refundPublicKey || payment.refundLocktime || payment.refundSwap
+  )) throw malformed(label);
   if (payment.deliveryRetryable === false && state !== "recoverable") throw malformed(label);
-  if (payment.deliveredAt && !completeDelivery && state !== "spent") throw malformed(label);
+  if (payment.deliveredAt && !completeDelivery && !["spent", "refunded"].includes(state)) throw malformed(label);
   return payment;
 }
 
@@ -375,6 +393,7 @@ function assertSpendableProofsAreNotReserved(snapshot: MarketSnapshot): void {
   const spendable = new Set(snapshot.proofs.map((proof) => proof.secret));
   const reserved = [
     ...snapshot.payments.flatMap((payment) => payment.swap?.inputs ?? []),
+    ...snapshot.payments.flatMap((payment) => payment.refundSwap?.inputs ?? []),
     ...snapshot.cashOut.flatMap((operation) => operation.reservedProofs ?? []),
   ];
   if (reserved.some((proof) => spendable.has(proof.secret))) {

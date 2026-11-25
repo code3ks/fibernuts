@@ -1,5 +1,5 @@
-import { ArrowLeft, ArrowRight, CheckCircle2, RefreshCw, ScanLine } from "lucide-react";
-import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { ArrowLeft, ArrowRight, CheckCircle2, RefreshCw, RotateCcw, ScanLine } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { fmt } from "@wallet-lib/wallet";
 
@@ -7,19 +7,28 @@ import { Button, Notice, ScreenHeading, StatusBadge, TextArea } from "../compone
 import { QrScanner } from "../components/QrScanner";
 import { safeErrorMessage } from "../domain/errors";
 import type { PaymentReview } from "../domain/market-runtime";
-import { paymentCanCheck, paymentCanRetry, type AttendeePayment } from "../domain/types";
+import {
+  paymentCanCheck,
+  paymentCanRefund,
+  paymentCanRetry,
+  paymentHasRefundPath,
+  type AttendeePayment,
+} from "../domain/types";
 import type { MarketController } from "../hooks/useMarket";
 
 type PayView = "scan" | "review" | "processing" | "result";
 
-function paymentTone(payment: AttendeePayment): "pending" | "settled" | "recoverable" {
-  if (payment.state === "spent") return "settled";
+function paymentTone(payment: AttendeePayment): "neutral" | "pending" | "settled" | "recoverable" {
+  if (payment.state === "refunded") return "settled";
+  if (payment.state === "spent") return "neutral";
   if (payment.state === "recoverable") return "recoverable";
   return "pending";
 }
 
 function paymentLabel(payment: AttendeePayment): string {
-  if (payment.state === "spent") return "Vendor-key spend observed";
+  if (payment.state === "refunded") return "Refunded";
+  if (payment.state === "refunding") return "Refund in progress";
+  if (payment.state === "spent") return "Token spent";
   if (payment.state === "unspent") return "Waiting for vendor";
   if (payment.state === "pending") return "Issuer check pending";
   if (payment.state === "recoverable") return "Action required";
@@ -34,8 +43,15 @@ export function AttendeePay({ market, onDone }: { market: MarketController; onDo
   const [paymentId, setPaymentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [localBusy, setLocalBusy] = useState(false);
+  const [now, setNow] = useState(Date.now());
   const payment = useMemo(() => market.snapshot.payments.find((item) => item.id === paymentId) ?? null, [market.snapshot.payments, paymentId]);
   const available = market.status === "online" && !market.storageError && !market.preview;
+
+  useEffect(() => {
+    if (!payment || !paymentHasRefundPath(payment) || ["refunded", "spent"].includes(payment.state)) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [payment]);
 
   const read = async (event?: FormEvent) => {
     event?.preventDefault();
@@ -97,6 +113,23 @@ export function AttendeePay({ market, onDone }: { market: MarketController; onDo
   if (view === "result" && payment) {
     const canRetry = paymentCanRetry(payment);
     const canCheck = paymentCanCheck(payment);
+    const hasRefund = paymentHasRefundPath(payment);
+    const canRefund = paymentCanRefund(payment, now);
+    const refundAt = payment.refundLocktime ? new Date(payment.refundLocktime * 1000) : null;
+    const resultCopy = payment.state === "refunded"
+      ? `The mint returned ${fmt(payment.amount)} RUSD as fresh spendable proofs. The ${fmt(payment.fee)} RUSD proof fee is not refunded.`
+      : payment.state === "spent"
+        ? "The mint reports that the delivered token was consumed. This browser did not receive refund proofs, so no value was credited here."
+        : payment.state === "refunding"
+          ? "The refund request is stored. This screen will credit value only after the mint returns fresh proofs."
+          : "The vendor can settle this payment with the mint. Delivery alone is not settlement.";
+    const recoveryAction = canRefund
+      ? <Button variant="secondary" icon={RotateCcw} busy={market.busy} onClick={() => void recover(() => market.refundPayment(payment), "The stored payment could not be refunded.")}>{payment.refundSwap ? "Resume refund" : "Refund if unspent"}</Button>
+      : canRetry
+        ? <Button variant="secondary" icon={RefreshCw} busy={market.busy} onClick={() => void recover(() => market.retryPaymentDelivery(payment), "The stored payment could not be delivered.")}>Resume payment</Button>
+        : canCheck
+          ? <Button variant="secondary" icon={RefreshCw} busy={market.busy} onClick={() => void recover(() => market.checkPayment(payment), "The proof state could not be checked.")}>Check proof state</Button>
+          : <span />;
     return (
       <div className="flow-column flow-enter">
         <section className="payment-result">
@@ -104,13 +137,19 @@ export function AttendeePay({ market, onDone }: { market: MarketController; onDo
           <span className="eyebrow">{payment.vendorName}</span>
           <div className="payment-result__amount"><strong>{fmt(payment.amount)}</strong><span>RUSD</span></div>
           <h1>{payment.description}</h1>
-          <p>{payment.state === "spent" ? "The mint reports that the vendor-key-locked proofs were spent. The vendor device separately confirms settlement with fresh proofs." : "The vendor receives and secures this payment with the mint. Delivery alone is not settlement."}</p>
+          <p>{resultCopy}</p>
         </section>
         {payment.error ? <Notice tone="recoverable" title="Payment needs attention">{payment.error}</Notice> : null}
         {error ? <Notice tone="failed">{error}</Notice> : null}
-        {payment.state !== "spent" ? <Notice tone="pending">This payment is locked to the vendor key and cannot be reclaimed by this attendee wallet.</Notice> : <Notice tone="settled">The delivered token has been consumed and its bearer value is no longer retained here.</Notice>}
+        {hasRefund && refundAt && !["refunded", "spent"].includes(payment.state) ? (
+          <Notice tone={canRefund ? "recoverable" : "pending"} title={canRefund ? "Refund window open" : "Refund protected"}>
+            {canRefund
+              ? "You may ask the mint to refund this token if it is still unspent. The vendor key remains valid, so the first accepted mint swap wins."
+              : `Only the vendor key can spend before ${refundAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. After that, either side may try and the first accepted mint swap wins.`}
+          </Notice>
+        ) : payment.state === "spent" ? <Notice tone="neutral">The bearer token is no longer retained here. Proof consumption does not identify which device completed the winning swap.</Notice> : null}
         <div className="split-actions">
-          {canRetry ? <Button variant="secondary" icon={RefreshCw} busy={market.busy} onClick={() => void recover(() => market.retryPaymentDelivery(payment), "The stored payment could not be delivered.")}>Resume payment</Button> : canCheck ? <Button variant="secondary" icon={RefreshCw} busy={market.busy} onClick={() => void recover(() => market.checkPayment(payment), "The proof state could not be checked.")}>Check proof state</Button> : <span />}
+          {recoveryAction}
           <Button icon={CheckCircle2} onClick={onDone}>Done</Button>
         </div>
       </div>
@@ -132,7 +171,7 @@ export function AttendeePay({ market, onDone }: { market: MarketController; onDo
             <div className="detail-list__total"><dt>Balance after</dt><dd className="mono">{fmt(remaining)} RUSD</dd></div>
           </dl>
         </section>
-        <Notice tone="recoverable" title="Vendor-only payment">Confirming swaps your proofs into a token only this vendor key can spend. Delivery can be retried, but this version has no attendee refund path.</Notice>
+        <Notice tone="recoverable" title="Timed refund protection">Only the vendor can spend before {new Date(review.refundLocktime * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. After that, this wallet can request a refund if the token is still unspent. The first swap accepted by the mint wins.</Notice>
         {error ? <Notice tone="failed">{error}</Notice> : null}
         <div className="split-actions split-actions--confirm">
           <Button variant="secondary" icon={ArrowLeft} onClick={() => { setView("scan"); setReview(null); }}>Back</Button>

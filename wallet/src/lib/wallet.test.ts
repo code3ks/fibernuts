@@ -129,6 +129,8 @@ describe("wallet amount helpers", () => {
     const wallet = new FibernutsWallet("https://mint.example");
     const privateKey = createRandomSecretKey();
     const publicKey = Buffer.from(getPubKeyFromPrivKey(privateKey)).toString("hex");
+    const refundKey = Buffer.from(getPubKeyFromPrivKey(createRandomSecretKey())).toString("hex");
+    const locktime = 1_800_000_000;
     const proof = (secret: string) => ({
       amount: 1,
       id: "009a1f293253e41e",
@@ -136,7 +138,7 @@ describe("wallet amount helpers", () => {
       C: `02${"11".repeat(32)}`,
     });
     const exactProof = proof(createP2PKsecret(publicKey));
-    const refundableProof = proof(createP2PKsecret(publicKey, [["locktime", "1800000000"], ["refund", publicKey]]));
+    const refundableProof = proof(createP2PKsecret(publicKey, [["locktime", String(locktime)], ["refund", refundKey]]));
     vi.spyOn(wallet, "inspectToken").mockImplementation((token) => ({
       amount: 1,
       mint: "https://mint.example",
@@ -146,6 +148,8 @@ describe("wallet amount helpers", () => {
 
     expect(wallet.tokenIsLockedTo("exact", publicKey)).toBe(true);
     expect(wallet.tokenIsLockedTo("refundable", publicKey)).toBe(false);
+    expect(wallet.refundPublicKeyForToken("refundable", publicKey, locktime)).toBe(refundKey);
+    expect(wallet.refundPublicKeyForToken("refundable", publicKey, locktime + 1)).toBeNull();
   });
 
   it("returns only newly issued change after an online send", async () => {
