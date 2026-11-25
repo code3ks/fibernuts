@@ -2,10 +2,13 @@ import { ArrowRight, CheckCircle2, RotateCcw, Share2 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState, type FormEvent } from "react";
 
 import type { SendOperation, WalletOperation } from "../domain/operations";
+import { safeErrorMessage } from "../domain/errors";
 import { decodePaymentRequest, type DecodedPaymentRequest } from "../lib/payment-request";
 import { fmt, type PreparedSend } from "../lib/wallet";
 import { QrScanner } from "../components/QrScanner";
 import { Button, FormTextarea, Notice, QrPanel, StatusBadge } from "../components/Primitives";
+import { SettlementFacts } from "../components/SettlementFacts";
+import type { SettlementContext } from "../domain/settlement-context";
 
 type PayView = "scan" | "checking" | "review" | "building" | "token";
 
@@ -21,6 +24,8 @@ export interface OutgoingPreparation {
 export function PayScreen({
   ticker,
   mintName,
+  mintUrl,
+  context,
   operations,
   onPreparePayment,
   onCreatePayment,
@@ -28,6 +33,8 @@ export function PayScreen({
 }: {
   ticker: string;
   mintName: string;
+  mintUrl: string;
+  context: SettlementContext;
   operations: WalletOperation[];
   onPreparePayment: (request: DecodedPaymentRequest) => Promise<OutgoingPreparation>;
   onCreatePayment: (request: DecodedPaymentRequest, preparation: OutgoingPreparation) => Promise<SendOperation>;
@@ -57,7 +64,7 @@ export function PayScreen({
         setPreparation(nextPreparation);
         setView("review");
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : "The payment request could not be read.");
+        setError(safeErrorMessage(reason, "The payment request could not be read."));
         setPreparation(null);
         setView("scan");
       }
@@ -95,7 +102,7 @@ export function PayScreen({
       setOperationId(created.id);
       setView("token");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The payment token could not be created.");
+      setError(safeErrorMessage(reason, "The payment token could not be created."));
       setView("review");
     } finally {
       confirmingRef.current = false;
@@ -139,6 +146,7 @@ export function PayScreen({
               <dd className="mono">{fmt(preparation.balance - preparation.debit)} {ticker}</dd>
             </div>
           </dl>
+          <SettlementFacts context={context} mintUrl={mintUrl} unit={ticker} title="Payment settlement" />
         </section>
         <Notice tone="recoverable">
           The fee covers this wallet's split and the recipient's future settlement swap. The bearer token
@@ -178,6 +186,31 @@ export function PayScreen({
   }
 
   if (view === "token" && operation && !operation.token) {
+    const spent = operation.state === "accepted";
+    const reclaimed = operation.state === "reclaimed";
+    if (spent || reclaimed) {
+      return (
+        <div className="flow-column flow-enter">
+          <section className="result-receipt">
+            <StatusBadge tone="settled">{spent ? "Token spent" : "Value reclaimed"}</StatusBadge>
+            <div className="result-receipt__amount">
+              <strong>{fmt(operation.amount)}</strong>
+              <span>{ticker}</span>
+            </div>
+            <h2>{spent ? "The mint reports every proof spent" : "Fresh proofs are back in your balance"}</h2>
+            <Notice tone="settled">
+              {spent
+                ? "The bearer token can no longer be claimed. Proof state does not identify who claimed it."
+                : "The token remained unspent and was replaced with fresh wallet proofs."}
+            </Notice>
+          </section>
+          <div className="split-actions">
+            <Button variant="secondary" icon={RotateCcw} onClick={restart}>Pay again</Button>
+            <Button icon={CheckCircle2} onClick={onDone}>Done</Button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flow-column flow-enter">
         <section className="result-receipt">
@@ -198,7 +231,7 @@ export function PayScreen({
   }
 
   if (view === "token" && operation?.token) {
-    const accepted = operation.state === "accepted";
+    const spent = operation.state === "accepted";
     const token = operation.token;
     const share = async () => {
       try {
@@ -218,7 +251,7 @@ export function PayScreen({
         <section className="token-receipt">
           <div className="token-receipt__head">
             <span className="eyebrow">Bearer payment</span>
-            <StatusBadge tone={accepted ? "settled" : "pending"}>{accepted ? "Accepted" : "Awaiting acceptance"}</StatusBadge>
+            <StatusBadge tone={spent ? "settled" : "pending"}>{spent ? "Token spent" : "Awaiting claim"}</StatusBadge>
           </div>
           <QrPanel value={operation.token} label="Cashu token" sensitive />
           <div className="token-receipt__amount">
@@ -226,9 +259,9 @@ export function PayScreen({
             <span>{ticker}</span>
           </div>
           <p>{operation.note || "Payment"}</p>
-          {accepted ? (
-            <Notice tone="settled" title="Accepted by the recipient">
-              The original proofs are spent. This bearer token cannot be claimed again.
+          {spent ? (
+            <Notice tone="settled" title="The token was claimed">
+              The original proofs are spent. The wallet cannot identify who claimed the bearer token.
             </Notice>
           ) : (
             <Notice tone="pending" title="Treat this code like cash">
@@ -237,7 +270,7 @@ export function PayScreen({
           )}
           {error ? <Notice tone="failed">{error}</Notice> : null}
         </section>
-        {!accepted ? (
+        {!spent ? (
           <Button variant="secondary" icon={Share2} onClick={() => void share()}>
             Share token
           </Button>

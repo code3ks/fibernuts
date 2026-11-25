@@ -22,6 +22,7 @@ import type { OperationTone, WalletOperation } from "../domain/operations";
 
 const TONE_ICON: Record<OperationTone, LucideIcon> = {
   neutral: Info,
+  processing: LoaderCircle,
   pending: Clock3,
   settled: CheckCircle2,
   failed: XCircle,

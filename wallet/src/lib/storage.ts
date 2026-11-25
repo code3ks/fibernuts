@@ -1,6 +1,8 @@
 import { deserializeProofs, type Proof, type ProofLike } from "@cashu/cashu-ts";
 
 import type { CashOutOperation, StoredSwapPreview, WalletOperation } from "../domain/operations";
+import { safeErrorMessage } from "../domain/errors";
+import { normalizeSettlementContext } from "../domain/settlement-context";
 import { normalizeMintUrl, type DecodedPaymentRequest } from "./payment-request";
 
 const STATE_VERSION = 2;
@@ -51,6 +53,12 @@ function normalizeOperations(value: unknown): WalletOperation[] {
     }
 
     const operation = item as WalletOperation;
+    const normalizedContext = normalizeSettlementContext(raw.context);
+    const context = normalizedContext?.unit.value.toLowerCase() === operation.unit.toLowerCase()
+      ? normalizedContext
+      : undefined;
+    const note = typeof raw.note === "string" ? raw.note : undefined;
+    const error = typeof raw.error === "string" ? safeErrorMessage(raw.error) : undefined;
     if (operation.kind === "add") {
       if (
         !["awaiting_payment", "payment_observed", "issuing", "settled", "expired", "recoverable", "failed"].includes(operation.state) ||
@@ -65,13 +73,16 @@ function normalizeOperations(value: unknown): WalletOperation[] {
         ? operation.quotePrivateKey
         : undefined;
       if (fundingSource && !quotePubkey) return [];
-      return [{ ...operation, fundingSource, quotePubkey, quotePrivateKey }];
+      return [{ ...operation, context, note, error, fundingSource, quotePubkey, quotePrivateKey }];
     }
 
     if (operation.kind === "send") {
-      if (!["preparing", "awaiting_acceptance", "accepted", "reclaiming", "reclaimed", "recovery_required"].includes(operation.state)) return [];
+      if (!["preparing", "awaiting_acceptance", "acceptance_pending", "accepted", "reclaiming", "reclaimed", "recovery_required"].includes(operation.state)) return [];
       return [{
         ...operation,
+        context,
+        note,
+        error,
         fee: Number.isSafeInteger(operation.fee) && (operation.fee ?? -1) >= 0 ? operation.fee : undefined,
         token: typeof operation.token === "string" ? operation.token : undefined,
         swap: normalizeSwap(operation.swap),
@@ -79,9 +90,12 @@ function normalizeOperations(value: unknown): WalletOperation[] {
     }
 
     if (operation.kind === "receive") {
-      if (!["detected", "checking", "securing", "settled", "recoverable", "failed"].includes(operation.state)) return [];
+      if (!["detected", "checking", "securing", "settled", "recoverable", "rejected", "spent", "discarded", "failed"].includes(operation.state)) return [];
       return [{
         ...operation,
+        context,
+        note,
+        error,
         requestId: typeof operation.requestId === "string" ? operation.requestId : undefined,
         requestedAmount: Number.isSafeInteger(operation.requestedAmount) && (operation.requestedAmount ?? 0) > 0
           ? operation.requestedAmount
@@ -104,6 +118,9 @@ function normalizeOperations(value: unknown): WalletOperation[] {
       ) return [];
       const cashout: CashOutOperation = {
         ...operation,
+        context,
+        note,
+        error,
         cashuFee: Number.isSafeInteger(operation.cashuFee) && (operation.cashuFee ?? -1) >= 0
           ? operation.cashuFee
           : undefined,
@@ -164,6 +181,14 @@ function normalizeUnit(value: unknown): string | undefined {
   return /^[a-z0-9_-]{1,24}$/.test(unit) ? unit : undefined;
 }
 
+function belongsToMint(operation: WalletOperation, mintUrl: string): boolean {
+  try {
+    return normalizeMintUrl(operation.mintUrl) === normalizeMintUrl(mintUrl);
+  } catch {
+    return false;
+  }
+}
+
 export function emptyWalletSnapshot(): WalletSnapshot {
   return { version: STATE_VERSION, unit: undefined, proofs: [], operations: [], openRequest: undefined };
 }
@@ -173,7 +198,8 @@ export function loadWalletSnapshot(mintUrl: string, storage: Storage = localStor
     const encoded = storage.getItem(stateKey(mintUrl));
     if (encoded) {
       const parsed = JSON.parse(encoded) as Partial<WalletSnapshot>;
-      const normalizedOperations = normalizeOperations(parsed.operations);
+      const normalizedOperations = normalizeOperations(parsed.operations)
+        .filter((operation) => belongsToMint(operation, mintUrl));
       const operationUnits = [...new Set(normalizedOperations.map((operation) => operation.unit.toLowerCase()))];
       const unit = normalizeUnit(parsed.unit) ?? (operationUnits.length === 1 ? normalizeUnit(operationUnits[0]) : undefined);
       return {

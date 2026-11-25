@@ -7,7 +7,7 @@ change, which states must survive interruption, and which failures remain ambigu
 This is a design and verification contract. Controls marked **target** are not claims about the
 current implementation.
 
-Last reviewed: 2026-11-14.
+Last reviewed: 2026-11-24.
 
 ## Security goals
 
@@ -168,6 +168,18 @@ balance change as one local commit before displaying or copying the token. Reloa
 same token. Reclaim is permitted only after the issuing mint proves the outgoing proofs remain
 unspent.
 
+The browser presents `Processing`, `Pending`, `Settled`, terminal `Failed`, and
+`AmbiguousRecoverable` as distinct phases. Every stored operation must explain the current
+authoritative evidence, whether value is spendable or reserved, and the only safe next action.
+Prepared outputs, reserved proofs, and bearer recovery material remain attached until a terminal
+transition authorizes their removal. A pending proof check is not an unspent result and cannot
+authorize reclaim.
+
+Operation provenance records the mint response for name, unit, and Fiber method separately from an
+operator-declared network and exact asset type script. An operator declaration is scoped to one
+normalized mint URL. It must not follow a user-selected custom mint, and presentation must label it
+as a declaration rather than independent verification.
+
 ## Hosted-LSP and client signer
 
 The hosted LSP controls availability, tenant runtime scheduling, and the public Fiber connection.
@@ -271,7 +283,8 @@ failure, timeout, retry, and panic/error formatting paths.
 | Timeout/unknown never becomes failed cash-out | Durable restart reconciliation, delayed terminal events, request deadlines, and timeout fault injection tested | Extend live failure evidence at each release pin |
 | Exact network and UDT validation | Tested | Re-verify on stable Fiber and mainnet preflight |
 | Incoming/outgoing operation journal | Durable scoped schema, restored reconciliation, deduplicated notification handoff, bounded concurrent scheduling, and jittered backoff | Extend live failure evidence and operator health export |
-| Outgoing token redisplay/reclaim | Implemented in reference browser flows | Reload, multi-tab, mint-refusal, and safe-reclaim coverage |
+| Wallet recovery and provenance | Processing, pending, terminal, and recoverable states; exact stored settlement context; reload and interrupted cash-out coverage | Multi-tab compare-and-swap and live mint-refusal evidence |
+| Outgoing token redisplay/reclaim | Reload and pending-proof coverage in reference browser flows | Multi-tab and live safe-reclaim evidence |
 | Hosted tenant and remote signer | Not shipped | Pinned upstream adapter plus public-testnet security gate |
 | Browser wallet funding | Not shipped | JoyID/CCC witness-only external funding with interruption tests |
 | NUT-11 refund | Not shipped | Race-safe implementation and recovery evidence |

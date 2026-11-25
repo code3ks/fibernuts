@@ -102,6 +102,29 @@ The melt path is where a mint loses money. Three rules:
 - **Never dispatch twice.** Fiber refuses to re-send a payment hash whose session is not `Failed`,
   so a retried melt reports the existing session.
 
+### Reference-wallet recovery and settlement context
+
+The reference wallet presents local work as `Processing`, an external non-terminal result as
+`Pending`, mint-authorized completion as `Settled`, terminal rejection as `Failed`, and a missing or
+conflicting result as `Recoverable`. A timeout, offline response, or interrupted request never
+changes reserved value into spendable balance. Each operation detail states what is known, where
+the value currently sits, and the safe next action.
+
+Before displaying an outgoing token or dispatching a cash-out, the wallet commits the operation,
+selected proofs, prepared outputs, and resulting spendable proof set in one versioned browser
+snapshot. Pending and recoverable operations keep those inputs and outputs after reload. The wallet
+disables duplicate actions for an operation while its status or recovery request is in flight. An
+outgoing bearer token may be reclaimed only when every proof is authoritatively unspent; a received
+token enters the balance only after the mint swaps it for fresh proofs.
+
+Every new operation also stores its settlement context: mint URL and name, unit, payment method,
+network, exact Fiber asset type script, and the source of each claim. Mint name, unit, and supported
+method come from the mint response. Network and asset script are operator declarations bound only
+to the compiled default mint URL. Selecting another mint does not carry those declarations over;
+the wallet shows them as unavailable until that mint has its own reviewed declaration. These
+fields make configuration inspectable, but do not prove backing, reserves, solvency, or redemption
+policy.
+
 ## 4. Units and rounding
 
 RUSD carries 8 decimals. One ecash unit is one RUSD **cent**: `unit_scale = 1_000_000` base units.

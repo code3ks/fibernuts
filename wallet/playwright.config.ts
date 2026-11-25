@@ -17,5 +17,12 @@ export default defineConfig({
     url: "http://127.0.0.1:5174",
     reuseExistingServer: true,
     timeout: 30_000,
+    env: {
+      VITE_MINT_URL: "http://127.0.0.1:5174",
+      VITE_NETWORK_LABEL: "CKB Testnet / Fiber",
+      VITE_ASSET_CODE_HASH: `0x${"11".repeat(32)}`,
+      VITE_ASSET_HASH_TYPE: "type",
+      VITE_ASSET_ARGS: `0x${"22".repeat(32)}`,
+    },
   },
 });

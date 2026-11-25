@@ -198,7 +198,19 @@ operators who will open channels to this node.
 
 Do this only after `/v1/info` works and the mint has usable RUSD liquidity:
 
-1. Set `VITE_MINT_URL=https://mint.fibernuts.xyz` in the wallet hosting provider.
+1. Set the default mint and its operator-declared settlement identity in the wallet hosting
+   provider:
+
+   ```sh
+   VITE_MINT_URL=https://mint.fibernuts.xyz
+   VITE_NETWORK_LABEL="CKB Testnet / Fiber"
+   VITE_ASSET_CODE_HASH=0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a
+   VITE_ASSET_HASH_TYPE=type
+   VITE_ASSET_ARGS=0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b
+   ```
+
+   These asset fields are displayed as operator configuration for this exact default mint URL. They
+   do not prove backing or follow a user-selected custom mint.
 2. Redeploy the wallet because Vite embeds this value at build time.
 3. In an existing browser profile, open **Mint details**, enter `https://mint.fibernuts.xyz`, and
    choose **Use this mint**. New profiles use the compiled default automatically.

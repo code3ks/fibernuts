@@ -2,14 +2,16 @@ import { CheckCircle2, Link2, RefreshCw, Server, ShieldAlert } from "lucide-reac
 import { useState, type FormEvent } from "react";
 
 import { Button, Notice, StatusBadge } from "../components/Primitives";
+import { SettlementFacts } from "../components/SettlementFacts";
 import type { MintConnectionStatus } from "../components/AppShell";
+import type { SettlementContext } from "../domain/settlement-context";
 import { normalizeMintUrl } from "../lib/payment-request";
 import type { MintProfile } from "../lib/wallet";
 
 export function MintScreen({
   mintUrl,
   ticker,
-  network,
+  context,
   status,
   profile,
   connectionError,
@@ -18,7 +20,7 @@ export function MintScreen({
 }: {
   mintUrl: string;
   ticker: string;
-  network: string;
+  context: SettlementContext;
   status: MintConnectionStatus;
   profile: MintProfile | null;
   connectionError?: string | null;
@@ -54,10 +56,8 @@ export function MintScreen({
             {status === "online" ? "Compatible" : status === "offline" ? "Unavailable" : status === "incompatible" ? "Incompatible" : "Checking"}
           </StatusBadge>
         </section>
+        <SettlementFacts context={context} mintUrl={mintUrl} unit={ticker} />
         <dl className="detail-list mint-facts">
-          <div><dt>Mint URL</dt><dd className="mono detail-list__clip">{mintUrl}</dd></div>
-          <div><dt>Wallet unit</dt><dd>{ticker}</dd></div>
-          <div><dt>Network</dt><dd>{network} <span className="fact-source">Local configuration</span></dd></div>
           <div><dt>Fiber add cash</dt><dd>{profile ? (profile.supportsFiberMint ? "Advertised" : "Not advertised") : "Unavailable"}</dd></div>
           <div><dt>Fiber cash out</dt><dd>{profile ? (profile.supportsFiberMelt ? "Advertised" : "Not advertised") : "Unavailable"}</dd></div>
           <div><dt>Lost-response recovery</dt><dd>{profile ? (profile.supportsRestore ? "NUT-09 advertised" : "Not advertised") : "Unavailable"}</dd></div>
@@ -77,7 +77,7 @@ export function MintScreen({
         </Notice>
         <div className="trust-boundaries">
           <div><CheckCircle2 size={18} aria-hidden="true" /><span><strong>What the wallet checks</strong>Mint URL, unit, token state, and returned proofs.</span></div>
-          <div><ShieldAlert size={18} aria-hidden="true" /><span><strong>What it cannot prove</strong>Backing-asset identity, mint solvency, operator policy, or future redemption access.</span></div>
+          <div><ShieldAlert size={18} aria-hidden="true" /><span><strong>What it cannot prove</strong>That an operator-declared asset is fully backed, mint solvency, operator policy, or future redemption access.</span></div>
         </div>
         <form className="change-mint" onSubmit={submit} noValidate>
           <div className="field">

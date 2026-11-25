@@ -1,10 +1,13 @@
 import { ArrowRight, CheckCircle2, Landmark, RefreshCw } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useRef, useState, type FormEvent } from "react";
 
 import { Button, FormTextarea, Notice, ProgressSteps, StatusBadge } from "../components/Primitives";
 import { QrScanner } from "../components/QrScanner";
 import type { CashOutOperation, WalletOperation } from "../domain/operations";
+import type { SettlementContext } from "../domain/settlement-context";
 import { explainMeltError, fmt, units, type MeltQuote, type PreparedMelt } from "../lib/wallet";
+import { SettlementFacts } from "../components/SettlementFacts";
+import { safeErrorMessage } from "../domain/errors";
 
 type CashOutView = "invoice" | "review" | "dispatching" | "status";
 
@@ -20,6 +23,8 @@ export function CashOutScreen({
   balance,
   ticker,
   mintName,
+  mintUrl,
+  context,
   online,
   operations,
   onQuote,
@@ -31,6 +36,8 @@ export function CashOutScreen({
   balance: number;
   ticker: string;
   mintName: string;
+  mintUrl: string;
+  context: SettlementContext;
   online: boolean;
   operations: WalletOperation[];
   onQuote: (invoice: string) => Promise<MeltQuote>;
@@ -46,6 +53,7 @@ export function CashOutScreen({
   const [operationId, setOperationId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const confirmingRef = useRef(false);
   const operation = useMemo(
     () => operations.find((item): item is CashOutOperation => item.kind === "cashout" && item.id === operationId),
     [operationId, operations],
@@ -66,14 +74,15 @@ export function CashOutScreen({
       setPreparation(nextPreparation);
       setView("review");
     } catch (reason) {
-      setError(explainMeltError(reason instanceof Error ? reason.message : "The invoice could not be quoted."));
+      setError(explainMeltError(safeErrorMessage(reason, "The invoice could not be quoted.")));
     } finally {
       setBusy(false);
     }
   };
 
   const confirm = async () => {
-    if (!quote || !preparation) return;
+    if (!quote || !preparation || confirmingRef.current) return;
+    confirmingRef.current = true;
     setView("dispatching");
     setError(null);
     try {
@@ -91,8 +100,10 @@ export function CashOutScreen({
       setOperationId(created.id);
       setView("status");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The payment could not be prepared.");
+      setError(safeErrorMessage(reason, "The payment could not be prepared."));
       setView("review");
+    } finally {
+      confirmingRef.current = false;
     }
   };
 
@@ -103,7 +114,7 @@ export function CashOutScreen({
     try {
       await onRefresh(operation);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The payment status could not be checked.");
+      setError(safeErrorMessage(reason, "The payment status could not be checked."));
     } finally {
       setBusy(false);
     }
@@ -134,7 +145,13 @@ export function CashOutScreen({
         <ProgressSteps
           steps={[
             { label: "Proofs reserved", detail: "Inputs and change recovery data were stored together.", state: "done" },
-            { label: "Payment dispatched", detail: "The mint was asked to pay the Fiber invoice.", state: failed ? "failed" : "done" },
+            {
+              label: "Mint request",
+              detail: operation.state === "unknown"
+                ? "The wallet cannot tell whether the mint accepted the request."
+                : "The mint returned an authoritative state for this request.",
+              state: operation.state === "unknown" ? "active" : failed ? "failed" : "done",
+            },
             { label: "Final result", detail: paid ? "The invoice is paid and change is stored." : failed ? "The mint confirmed failure and value was recovered." : "The mint has not returned a final state.", state: paid ? "done" : failed ? "failed" : "active" },
           ]}
         />
@@ -174,6 +191,7 @@ export function CashOutScreen({
             <div><dt>Maximum debit</dt><dd className="mono">{fmt(total)} {ticker}</dd></div>
             <div className="detail-list__total"><dt>Balance after maximum</dt><dd className="mono">{fmt(preparation.balance - total)} {ticker}</dd></div>
           </dl>
+          <SettlementFacts context={context} mintUrl={mintUrl} unit={ticker} title="Cash-out settlement" />
         </section>
         <Notice tone="recoverable">The fee reserve is a ceiling. Unused change is recovered only after the mint returns a final response.</Notice>
         {insufficient ? <Notice tone="failed">The maximum debit is larger than your spendable balance.</Notice> : null}

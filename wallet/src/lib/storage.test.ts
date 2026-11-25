@@ -49,6 +49,20 @@ describe("wallet storage", () => {
           mintUrl,
           unit: "rusd",
           token: "cashuBsynthetic",
+          context: {
+            mintName: { value: "Test mint", source: "mint_response" as const },
+            unit: { value: "RUSD", source: "mint_response" as const },
+            paymentMethod: { value: "Fiber", source: "mint_response" as const },
+            network: { value: "CKB Testnet", source: "operator_configuration" as const },
+            assetTypeScript: {
+              value: {
+                codeHash: `0x${"11".repeat(32)}`,
+                hashType: "type" as const,
+                args: `0x${"22".repeat(32)}`,
+              },
+              source: "operator_configuration" as const,
+            },
+          },
         },
       ],
       openRequest: {
@@ -153,5 +167,108 @@ describe("wallet storage", () => {
     expect(restored.unit).toBe("rusd");
     expect(restored.operations).toEqual([]);
     expect(restored.openRequest).toBeUndefined();
+  });
+
+  it("drops an operation whose mint URL conflicts with the snapshot key", () => {
+    const storage = new MemoryStorage();
+    const mintUrl = "https://mint.example";
+    storage.setItem(
+      `fibernuts:wallet:v2:${mintUrl}`,
+      JSON.stringify({
+        version: 2,
+        unit: "rusd",
+        proofs: [],
+        operations: [{
+          id: "wrong-mint",
+          kind: "send",
+          state: "awaiting_acceptance",
+          amount: 2,
+          createdAt: 1,
+          updatedAt: 1,
+          mintUrl: "https://other.example",
+          unit: "rusd",
+          token: "cashuBsynthetic",
+        }],
+      }),
+    );
+
+    expect(loadWalletSnapshot(mintUrl, storage).operations).toEqual([]);
+  });
+
+  it("restores new recovery states and drops conflicting provenance", () => {
+    const storage = new MemoryStorage();
+    const mintUrl = "https://mint.example";
+    storage.setItem(
+      `fibernuts:wallet:v2:${mintUrl}`,
+      JSON.stringify({
+        version: 2,
+        unit: "rusd",
+        proofs: [],
+        operations: [
+          {
+            id: "pending-send",
+            kind: "send",
+            state: "acceptance_pending",
+            amount: 2,
+            createdAt: 1,
+            updatedAt: 1,
+            mintUrl,
+            unit: "rusd",
+            token: "cashuBsynthetic",
+            context: {
+              mintName: { value: "Wrong unit mint", source: "mint_response" },
+              unit: { value: "SAT", source: "mint_response" },
+              paymentMethod: { value: "Fiber", source: "mint_response" },
+            },
+          },
+          {
+            id: "removed-receive",
+            kind: "receive",
+            state: "discarded",
+            amount: 3,
+            createdAt: 2,
+            updatedAt: 2,
+            mintUrl,
+            unit: "rusd",
+          },
+        ],
+      }),
+    );
+
+    const restored = loadWalletSnapshot(mintUrl, storage);
+    expect(restored.operations.map((operation) => operation.state)).toEqual(["acceptance_pending", "discarded"]);
+    expect(restored.operations[0].context).toBeUndefined();
+  });
+
+  it("redacts legacy operation errors and drops malformed display text on reload", () => {
+    const storage = new MemoryStorage();
+    const mintUrl = "https://mint.example";
+    const token = `cashuB${"a".repeat(80)}`;
+    storage.setItem(
+      `fibernuts:wallet:v2:${mintUrl}`,
+      JSON.stringify({
+        version: 2,
+        unit: "rusd",
+        proofs: [],
+        operations: [{
+          id: "legacy-error",
+          kind: "send",
+          state: "recovery_required",
+          amount: 2,
+          createdAt: 1,
+          updatedAt: 1,
+          mintUrl,
+          unit: "rusd",
+          note: { unsafe: true },
+          error: `Third-party error echoed ${token}`,
+          token: "cashuBsynthetic",
+        }],
+      }),
+    );
+
+    const [operation] = loadWalletSnapshot(mintUrl, storage).operations;
+    expect(operation.note).toBeUndefined();
+    expect(operation.error).toContain("[redacted Cashu token]");
+    expect(operation.error).not.toContain(token);
   });
 });

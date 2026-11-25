@@ -3,8 +3,10 @@ import { useState } from "react";
 
 import { OperationList } from "../components/OperationList";
 import { Button, CopyButton, Notice, StatusBadge } from "../components/Primitives";
-import { operationHasBearerSecret, presentOperation, type WalletOperation } from "../domain/operations";
-import { fmt } from "../lib/wallet";
+import { SettlementFacts } from "../components/SettlementFacts";
+import { safeErrorMessage } from "../domain/errors";
+import { operationGuidance, operationHasBearerSecret, presentOperation, type WalletOperation } from "../domain/operations";
+import { fmt, sumProofs } from "../lib/wallet";
 
 export function ActivityScreen({ operations, onOpen }: { operations: WalletOperation[]; onOpen: (operation: WalletOperation) => void }) {
   if (operations.length === 0) {
@@ -28,30 +30,6 @@ export function ActivityScreen({ operations, onOpen }: { operations: WalletOpera
   );
 }
 
-function operationDescription(operation: WalletOperation): string {
-  if (operation.kind === "add") {
-    if (operation.state === "settled") return "The Fiber payment was observed and fresh proofs were issued into this wallet.";
-    if (operation.state === "recoverable") return "The quote is stored, but proof issuance did not finish. Check the same quote again.";
-    if (operation.state === "expired" || operation.state === "failed") return "This quote did not add any proofs to the wallet.";
-    return "The mint quote is stored while payment and issuance complete.";
-  }
-  if (operation.kind === "send") {
-    if (operation.state === "accepted") return "The recipient spent the outgoing proofs. The bearer token is no longer reusable.";
-    if (operation.state === "reclaimed") return "The token was still unspent and its value was swapped back into this wallet.";
-    if (operation.swap && !operation.token) return "The selected inputs and output secrets are stored, but the outgoing bearer token has not been produced yet.";
-    if (operation.swap) return "The reclaim swap is stored and can be replayed without choosing new outputs.";
-    return "The bearer token is stored, but acceptance has not been proven. Keep it private or check before reclaiming.";
-  }
-  if (operation.kind === "receive") {
-    if (operation.state === "settled") return "The incoming bearer token was swapped for fresh proofs and is included in the balance.";
-    if (operation.state === "failed") return "The incoming token did not settle and is not included in the balance.";
-    return "The incoming token is retained for recovery but is not included in the balance until a swap succeeds.";
-  }
-  if (operation.state === "paid") return "The mint reports the external Fiber invoice paid. Returned change was stored with the result.";
-  if (operation.state === "failed") return "The mint reported failure and the reserved value was recovered into fresh proofs.";
-  return "The payment does not have a definitive result. Reserved proofs remain attached to this operation.";
-}
-
 function timestamp(value: number): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(value);
 }
@@ -60,6 +38,7 @@ export function OperationDetailScreen({
   operation,
   ticker,
   online,
+  checking,
   onRefresh,
   onReclaim,
   onDiscard,
@@ -67,6 +46,7 @@ export function OperationDetailScreen({
   operation: WalletOperation;
   ticker: string;
   online: boolean;
+  checking: boolean;
   onRefresh: (operation: WalletOperation) => Promise<void>;
   onReclaim: (operation: WalletOperation) => Promise<void>;
   onDiscard: (operation: WalletOperation) => Promise<void>;
@@ -76,16 +56,19 @@ export function OperationDetailScreen({
   const [error, setError] = useState<string | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const presentation = presentOperation(operation);
+  const guidance = operationGuidance(operation);
   const bearer = operationHasBearerSecret(operation) ? operation.token : undefined;
+  const isBusy = busy || checking;
   const canRefresh =
     (operation.kind === "add" && !["settled", "failed", "expired"].includes(operation.state)) ||
     (operation.kind === "send" && !["accepted", "reclaimed"].includes(operation.state)) ||
-    (operation.kind === "receive" && operation.state !== "settled" && operation.state !== "failed") ||
+    (operation.kind === "receive" && !["settled", "rejected", "spent", "discarded", "failed"].includes(operation.state)) ||
     (operation.kind === "cashout" && !["paid", "failed"].includes(operation.state));
   const canReclaim = operation.kind === "send" && Boolean(operation.token) && !operation.swap && ["awaiting_acceptance", "recovery_required"].includes(operation.state);
   const canDiscard = operation.kind === "receive" && Boolean(operation.token) && !operation.swap && operation.state !== "settled";
 
   const run = async (action: "refresh" | "reclaim" | "discard") => {
+    if (checking) return;
     setBusy(true);
     setError(null);
     try {
@@ -93,7 +76,7 @@ export function OperationDetailScreen({
       else if (action === "reclaim") await onReclaim(operation);
       else await onDiscard(operation);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The operation could not be updated.");
+      setError(safeErrorMessage(reason, "The operation could not be updated."));
     } finally {
       setBusy(false);
     }
@@ -112,18 +95,35 @@ export function OperationDetailScreen({
           </div>
           <StatusBadge tone={presentation.tone}>{presentation.stateLabel}</StatusBadge>
         </div>
-        <p className="operation-detail__description">{operationDescription(operation)}</p>
         <dl className="detail-list">
           <div><dt>Created</dt><dd>{timestamp(operation.createdAt)}</dd></div>
           <div><dt>Last checked</dt><dd>{timestamp(operation.updatedAt)}</dd></div>
           {operation.kind === "send" && operation.fee !== undefined ? <div><dt>Cashu proof fees</dt><dd className="mono">{fmt(operation.fee)} {ticker}</dd></div> : null}
+          {operation.kind === "send" && operation.fee !== undefined ? <div className="detail-list__total"><dt>Total debit</dt><dd className="mono">{fmt(operation.amount + operation.fee)} {ticker}</dd></div> : null}
+          {operation.kind === "cashout" ? <div><dt>Invoice amount</dt><dd className="mono">{fmt(operation.quote.amount)} {ticker}</dd></div> : null}
+          {operation.kind === "cashout" ? <div><dt>Route fee reserve</dt><dd className="mono">{fmt(operation.quote.feeReserve)} {ticker}</dd></div> : null}
           {operation.kind === "cashout" && operation.cashuFee !== undefined ? <div><dt>Cashu proof fee</dt><dd className="mono">{fmt(operation.cashuFee)} {ticker}</dd></div> : null}
-          <div><dt>Mint</dt><dd className="mono detail-list__clip">{operation.mintUrl}</dd></div>
+          {operation.kind === "cashout" ? <div className="detail-list__total"><dt>Maximum debit</dt><dd className="mono">{fmt(operation.quote.amount + operation.quote.feeReserve + (operation.cashuFee ?? 0))} {ticker}</dd></div> : null}
+          {operation.kind === "cashout" && operation.reservedProofs?.length ? <div><dt>Reserved proof value</dt><dd className="mono">{fmt(sumProofs(operation.reservedProofs))} {ticker}</dd></div> : null}
+          {operation.kind === "cashout" && operation.reservedProofs?.length ? <div><dt>Reserved proof count</dt><dd>{operation.reservedProofs.length}</dd></div> : null}
+          {"swap" in operation && operation.swap ? <div><dt>Stored input value</dt><dd className="mono">{fmt(sumProofs(operation.swap.inputs))} {ticker}</dd></div> : null}
+          {"swap" in operation && operation.swap ? <div><dt>Prepared outputs</dt><dd>{(operation.swap.sendOutputs?.length ?? 0) + (operation.swap.keepOutputs?.length ?? 0)}</dd></div> : null}
+          {operation.kind === "add" && operation.outputData?.length ? <div><dt>Prepared issuance outputs</dt><dd>{operation.outputData.length}</dd></div> : null}
+          {operation.kind === "cashout" && operation.outputData?.length ? <div><dt>Prepared change outputs</dt><dd>{operation.outputData.length}</dd></div> : null}
           <div><dt>Operation ID</dt><dd className="mono detail-list__clip">{operation.id}</dd></div>
         </dl>
       </section>
 
-      {operation.error ? <Notice tone={presentation.tone === "failed" ? "failed" : "recoverable"}>{operation.error}</Notice> : null}
+      <section className="operation-guidance" aria-label="Recovery guidance">
+        <div><span>Known</span><p>{guidance.known}</p></div>
+        <div><span>Value status</span><p>{guidance.valueStatus}</p></div>
+        <div><span>Safe next action</span><p>{guidance.nextAction}</p></div>
+      </section>
+
+      <SettlementFacts context={operation.context} mintUrl={operation.mintUrl} unit={operation.unit} title="Stored settlement context" />
+
+      {checking ? <Notice tone="processing" title="Checking this stored operation">Duplicate actions are disabled until the current mint request finishes.</Notice> : null}
+      {operation.error ? <Notice tone={presentation.tone}>{operation.error}</Notice> : null}
 
       {bearer ? (
         <section className="bearer-secret">
@@ -152,7 +152,7 @@ export function OperationDetailScreen({
           action={(
             <div className="split-actions">
               <Button variant="secondary" onClick={() => setConfirmDiscard(false)}>Keep token</Button>
-              <Button variant="danger" icon={Trash2} busy={busy} onClick={() => void run("discard")}>Remove token</Button>
+              <Button variant="danger" icon={Trash2} busy={isBusy} onClick={() => void run("discard")}>Remove token</Button>
             </div>
           )}
         >
@@ -163,12 +163,12 @@ export function OperationDetailScreen({
       {error ? <Notice tone="failed">{error}</Notice> : null}
       {canRefresh || canReclaim ? (
         <div className="split-actions">
-          {canRefresh ? <Button variant="secondary" icon={RefreshCw} busy={busy} disabled={!online} onClick={() => void run("refresh")}>Check status</Button> : <span />}
-          {canReclaim ? <Button variant="danger" icon={RotateCcw} busy={busy} disabled={!online} onClick={() => void run("reclaim")}>Reclaim if unspent</Button> : null}
+          {canRefresh ? <Button variant="secondary" icon={RefreshCw} busy={isBusy} disabled={!online} onClick={() => void run("refresh")}>Check status</Button> : <span />}
+          {canReclaim ? <Button variant="danger" icon={RotateCcw} busy={isBusy} disabled={!online} onClick={() => void run("reclaim")}>Reclaim if unspent</Button> : null}
         </div>
       ) : null}
       {canDiscard && !confirmDiscard ? (
-        <Button variant="danger" icon={Trash2} onClick={() => setConfirmDiscard(true)}>Remove from this device</Button>
+        <Button variant="danger" icon={Trash2} disabled={checking} onClick={() => setConfirmDiscard(true)}>Remove from this device</Button>
       ) : null}
     </div>
   );
