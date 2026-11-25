@@ -31,11 +31,11 @@ const RECORD_COLUMNS: &str = "
 ";
 
 /// Errors raised while opening, validating, or mutating the settlement journal.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum JournalError {
     /// SQLite could not complete the requested operation.
-    #[error("settlement journal storage error: {0}")]
-    Storage(#[from] rusqlite::Error),
+    #[error("settlement journal storage error")]
+    Storage(rusqlite::Error),
 
     /// A thread panicked while holding the journal connection.
     #[error("settlement journal lock is unavailable")]
@@ -84,8 +84,26 @@ pub enum JournalError {
     DestinationExists,
 
     /// A filesystem operation around an atomic backup failed.
-    #[error("settlement journal filesystem error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("settlement journal filesystem error")]
+    Io(std::io::Error),
+}
+
+impl fmt::Debug for JournalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl From<rusqlite::Error> for JournalError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<std::io::Error> for JournalError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 /// Whether value is entering or leaving the mint over Fiber.

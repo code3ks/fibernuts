@@ -1,0 +1,262 @@
+{
+  "schema_version": 1,
+  "scope": "settlement-reliability-and-redaction",
+  "ordinary_ci": {
+    "command": "make ci",
+    "validator": "node scripts/verify-settlement-evidence.mjs",
+    "live_network_access": false
+  },
+  "required_failure_classes": [
+    "restart",
+    "delayed_success",
+    "unknown_payment",
+    "malformed_response",
+    "timeout",
+    "event_replay",
+    "duplicate_request",
+    "journal_corruption",
+    "refund_race",
+    "fee_rounding",
+    "wrong_network",
+    "wrong_asset",
+    "wrong_unit",
+    "incompatible_version",
+    "no_duplicate_dispatch",
+    "no_duplicate_balance_mutation"
+  ],
+  "required_secret_classes": [
+    "cashu_token",
+    "proof",
+    "quote_secret",
+    "capability",
+    "signing_key",
+    "credential",
+    "fiber_invoice",
+    "payment_preimage",
+    "user_linked_identifier"
+  ],
+  "required_sinks": [
+    "log",
+    "metric",
+    "error",
+    "report",
+    "screenshot"
+  ],
+  "deterministic_evidence": [
+    {
+      "id": "incoming-restart-recovery",
+      "failure_classes": ["restart", "no_duplicate_balance_mutation"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "an_invoice_paid_while_the_processor_is_down_is_restored_on_start",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment an_invoice_paid_while_the_processor_is_down_is_restored_on_start -- --exact",
+      "invariant": "A paid incoming invoice restored after restart produces one credit event only."
+    },
+    {
+      "id": "outgoing-lost-response-recovery",
+      "failure_classes": ["restart", "timeout", "no_duplicate_dispatch"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "a_timed_out_dispatch_is_reconciled_and_never_sent_twice",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment a_timed_out_dispatch_is_reconciled_and_never_sent_twice -- --exact",
+      "invariant": "A timed-out dispatch is reconciled by its durable hash and is not sent again."
+    },
+    {
+      "id": "delayed-success-accounting",
+      "failure_classes": ["delayed_success", "fee_rounding", "event_replay", "no_duplicate_dispatch"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "delayed_outgoing_success_is_announced_once_after_restart_with_actual_fee",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment delayed_outgoing_success_is_announced_once_after_restart_with_actual_fee -- --exact",
+      "invariant": "Delayed success uses the durable principal and actual fee and emits one terminal event."
+    },
+    {
+      "id": "unknown-payment-state",
+      "failure_classes": ["unknown_payment"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "an_outgoing_payment_the_node_never_saw_is_unknown_not_failed",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment an_outgoing_payment_the_node_never_saw_is_unknown_not_failed -- --exact",
+      "invariant": "A missing Fiber session remains Unknown and never releases value as Failed."
+    },
+    {
+      "id": "malformed-rpc-response",
+      "failure_classes": ["malformed_response"],
+      "source": "mint/cdk-fiber/src/rpc.rs",
+      "selector": "malformed_http_json_is_an_invalid_response",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber rpc::tests::malformed_http_json_is_an_invalid_response -- --exact",
+      "invariant": "Malformed JSON is classified as an invalid response rather than settlement evidence."
+    },
+    {
+      "id": "mismatched-dispatch-recovery",
+      "failure_classes": ["malformed_response", "no_duplicate_dispatch"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "a_mismatched_dispatch_response_remains_ambiguous_and_nonterminal",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment a_mismatched_dispatch_response_remains_ambiguous_and_nonterminal -- --exact",
+      "invariant": "A conflicting dispatch response leaves one durable attempt in a recoverable nonterminal state."
+    },
+    {
+      "id": "stalled-rpc-isolation",
+      "failure_classes": ["timeout"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "a_stalled_rpc_reaches_its_deadline_without_blocking_other_reconciliation",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment a_stalled_rpc_reaches_its_deadline_without_blocking_other_reconciliation -- --exact",
+      "invariant": "A stalled lookup reaches its deadline while unrelated reconciliation continues."
+    },
+    {
+      "id": "incoming-event-replay",
+      "failure_classes": ["event_replay", "no_duplicate_balance_mutation"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "repeated_paid_status_checks_do_not_requeue_a_credit_event",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment repeated_paid_status_checks_do_not_requeue_a_credit_event -- --exact",
+      "invariant": "Repeated authoritative observations do not queue a second credit event."
+    },
+    {
+      "id": "concurrent-duplicate-melt",
+      "failure_classes": ["duplicate_request", "no_duplicate_dispatch"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "concurrent_duplicate_melts_cross_one_dispatch_boundary",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment concurrent_duplicate_melts_cross_one_dispatch_boundary -- --exact",
+      "invariant": "Concurrent duplicate requests cross one durable dispatch boundary."
+    },
+    {
+      "id": "journal-corruption-fails-closed",
+      "failure_classes": ["journal_corruption"],
+      "source": "mint/cdk-fiber/tests/settlement_journal.rs",
+      "selector": "a_corrupt_row_fails_the_recovery_read_instead_of_being_skipped",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test settlement_journal a_corrupt_row_fails_the_recovery_read_instead_of_being_skipped -- --exact",
+      "invariant": "A corrupt durable operation blocks recovery instead of being silently skipped."
+    },
+    {
+      "id": "refund-settlement-race",
+      "failure_classes": ["refund_race", "no_duplicate_balance_mutation"],
+      "source": "market/src/domain/market-runtime.test.ts",
+      "selector": "allows only one balance credit when refund and vendor settlement race",
+      "command": "npm --prefix market test -- --run src/domain/market-runtime.test.ts",
+      "invariant": "The mint's first accepted swap is the only balance credit across both claimants."
+    },
+    {
+      "id": "conservative-fee-rounding",
+      "failure_classes": ["fee_rounding"],
+      "source": "mint/cdk-fiber/src/amount.rs",
+      "selector": "charged_dust_rounds_up_so_the_mint_never_under_charges",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber amount::tests::charged_dust_rounds_up_so_the_mint_never_under_charges -- --exact",
+      "invariant": "Charged fractional base units round up and cannot leave the mint short."
+    },
+    {
+      "id": "wrong-network-rejection",
+      "failure_classes": ["wrong_network"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "a_wrong_network_melt_invoice_is_rejected_before_route_probe",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment a_wrong_network_melt_invoice_is_rejected_before_route_probe -- --exact",
+      "invariant": "A wrong-network invoice fails before route probing or proof reservation."
+    },
+    {
+      "id": "wrong-asset-rejection",
+      "failure_classes": ["wrong_asset"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "a_different_udt_melt_invoice_is_rejected_before_route_probe",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment a_different_udt_melt_invoice_is_rejected_before_route_probe -- --exact",
+      "invariant": "A different UDT fails before route probing or proof reservation."
+    },
+    {
+      "id": "wrong-unit-rejection",
+      "failure_classes": ["wrong_unit"],
+      "source": "mint/cdk-fiber/tests/mint_payment.rs",
+      "selector": "a_melt_in_a_foreign_unit_is_rejected",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test mint_payment a_melt_in_a_foreign_unit_is_rejected -- --exact",
+      "invariant": "A foreign Cashu unit is rejected before payment mutation."
+    },
+    {
+      "id": "incompatible-journal-version",
+      "failure_classes": ["incompatible_version"],
+      "source": "mint/cdk-fiber/tests/settlement_journal.rs",
+      "selector": "a_newer_schema_version_is_rejected_without_mutation",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test settlement_journal a_newer_schema_version_is_rejected_without_mutation -- --exact",
+      "invariant": "A newer durable schema fails closed without mutating its contents."
+    }
+  ],
+  "redaction_evidence": [
+    {
+      "id": "rust-diagnostic-redaction",
+      "secret_classes": ["cashu_token", "proof", "quote_secret", "capability", "signing_key", "credential", "fiber_invoice", "payment_preimage", "user_linked_identifier"],
+      "sinks": ["log", "error"],
+      "source": "mint/cdk-fiber/tests/redaction.rs",
+      "selector": "tracing_error_and_debug_output_redact_all_canaries",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test redaction tracing_error_and_debug_output_redact_all_canaries -- --exact"
+    },
+    {
+      "id": "aggregate-metric-redaction",
+      "secret_classes": ["proof", "quote_secret", "capability", "credential", "fiber_invoice", "payment_preimage", "user_linked_identifier"],
+      "sinks": ["metric"],
+      "source": "mint/cdk-fiber/src/metrics.rs",
+      "selector": "settlement_metrics_expose_only_aggregate_numbers",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber metrics::tests::settlement_metrics_expose_only_aggregate_numbers -- --exact"
+    },
+    {
+      "id": "browser-error-redaction",
+      "secret_classes": ["cashu_token", "proof", "quote_secret", "capability", "signing_key", "credential", "fiber_invoice", "payment_preimage", "user_linked_identifier"],
+      "sinks": ["error"],
+      "source": "wallet/src/domain/errors.test.ts",
+      "selector": "redacts named secrets and bounds untrusted errors",
+      "command": "npm --prefix wallet test -- --run src/domain/errors.test.ts"
+    },
+    {
+      "id": "market-error-redaction",
+      "secret_classes": ["cashu_token", "proof", "quote_secret", "capability", "signing_key", "credential", "fiber_invoice", "payment_preimage", "user_linked_identifier"],
+      "sinks": ["error"],
+      "source": "market/src/domain/errors.test.ts",
+      "selector": "uses a bounded fallback for unknown failures",
+      "command": "npm --prefix market test -- --run src/domain/errors.test.ts"
+    },
+    {
+      "id": "wallet-screenshot-redaction",
+      "secret_classes": ["proof", "quote_secret", "fiber_invoice", "user_linked_identifier"],
+      "sinks": ["screenshot"],
+      "source": "wallet/tests/wallet.spec.ts",
+      "selector": "an interrupted cash-out preserves provenance and reserved value across reload",
+      "command": "npm --prefix wallet run test:e2e -- --grep \"an interrupted cash-out\""
+    },
+    {
+      "id": "market-screenshot-redaction",
+      "secret_classes": ["cashu_token", "proof", "capability", "signing_key", "user_linked_identifier"],
+      "sinks": ["screenshot"],
+      "source": "market/tests/market.spec.ts",
+      "selector": "expectPublicCaptureSafe(attendee, screenshotCanaries)",
+      "command": "npm --prefix market run test:e2e -- --grep \"attendee refunds\""
+    },
+    {
+      "id": "evidence-report-redaction",
+      "secret_classes": ["cashu_token", "proof", "quote_secret", "capability", "signing_key", "credential", "fiber_invoice", "payment_preimage", "user_linked_identifier"],
+      "sinks": ["report"],
+      "source": "scripts/settlement-evidence.test.mjs",
+      "selector": "report scanner rejects every synthetic secret class",
+      "command": "node --test scripts/settlement-evidence.test.mjs"
+    }
+  ],
+  "live_scenarios": [
+    {
+      "id": "devnet-settled-invoice",
+      "network": "devnet",
+      "opt_in": true,
+      "source": "mint/cdk-fiber/tests/live_devnet.rs",
+      "selector": "a_settled_invoice_credits_exactly_what_landed",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test live_devnet a_settled_invoice_credits_exactly_what_landed -- --ignored --exact --test-threads=1",
+      "expected_economic_effect": "One funded devnet invoice settles and credits only the amount that landed."
+    },
+    {
+      "id": "devnet-held-tlc",
+      "network": "devnet",
+      "opt_in": true,
+      "source": "mint/cdk-fiber/tests/live_devnet.rs",
+      "selector": "a_held_tlc_is_never_credited",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test live_devnet a_held_tlc_is_never_credited -- --ignored --exact --test-threads=1",
+      "expected_economic_effect": "A deliberately held TLC reaches Received but never authorizes issuance."
+    },
+    {
+      "id": "devnet-unknown-payment",
+      "network": "devnet",
+      "opt_in": true,
+      "source": "mint/cdk-fiber/tests/live_devnet.rs",
+      "selector": "a_payment_the_node_never_saw_is_unknown_not_failed",
+      "command": "cargo test --manifest-path mint/Cargo.toml -p cdk-fiber --test live_devnet a_payment_the_node_never_saw_is_unknown_not_failed -- --ignored --exact --test-threads=1",
+      "expected_economic_effect": "A never-dispatched hash performs no payment and remains Unknown."
+    }
+  ]
+}

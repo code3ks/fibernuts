@@ -65,11 +65,18 @@ struct RpcResponse<R> {
 }
 
 /// A [`FiberRpc`] that speaks JSON-RPC 2.0 over HTTP to a Fiber node.
-#[derive(Debug)]
 pub struct HttpFiberRpc {
     client: reqwest::Client,
     url: String,
     next_id: AtomicU64,
+}
+
+impl std::fmt::Debug for HttpFiberRpc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpFiberRpc")
+            .field("endpoint", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl HttpFiberRpc {
@@ -330,5 +337,6 @@ mod tests {
         let error = rpc.get_payment(TEST_HASH).await.unwrap_err();
         assert!(matches!(error, Error::Transport(_)));
         assert!(!error.to_string().contains("synthetic-secret"));
+        assert!(!format!("{rpc:?}").contains("synthetic-secret"));
     }
 }

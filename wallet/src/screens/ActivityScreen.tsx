@@ -110,7 +110,6 @@ export function OperationDetailScreen({
           {"swap" in operation && operation.swap ? <div><dt>Prepared outputs</dt><dd>{(operation.swap.sendOutputs?.length ?? 0) + (operation.swap.keepOutputs?.length ?? 0)}</dd></div> : null}
           {operation.kind === "add" && operation.outputData?.length ? <div><dt>Prepared issuance outputs</dt><dd>{operation.outputData.length}</dd></div> : null}
           {operation.kind === "cashout" && operation.outputData?.length ? <div><dt>Prepared change outputs</dt><dd>{operation.outputData.length}</dd></div> : null}
-          <div><dt>Operation ID</dt><dd className="mono detail-list__clip">{operation.id}</dd></div>
         </dl>
       </section>
 

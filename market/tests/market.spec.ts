@@ -52,6 +52,21 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(sizes.body).toBeLessThanOrEqual(sizes.viewport + 1);
 }
 
+async function expectPublicCaptureSafe(page: Page, sensitiveValues: string[]) {
+  const visibleSurface = await page.evaluate(() => {
+    const values = Array.from(document.querySelectorAll("input, textarea, select"))
+      .filter((element) => {
+        const style = window.getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+      })
+      .map((element) => (element as HTMLInputElement).value);
+    return [document.body.innerText, ...values, window.location.href].join("\n");
+  });
+  for (const value of sensitiveValues.filter((item) => item.length >= 8)) {
+    expect(visibleSurface, "public screenshot surface exposed sensitive stored data").not.toContain(value);
+  }
+}
+
 function cors(route: Route) {
   return {
     "Access-Control-Allow-Origin": route.request().headers().origin ?? "http://127.0.0.1:5175",
@@ -603,6 +618,35 @@ for (const viewport of viewports) {
       ? attendee.locator(".desktop-header__balance strong")
       : attendee.locator(".mobile-header__title small");
     await expect(balance).toContainText(viewport.width >= 920 ? "7.74 RUSD" : "7.74 RUSD ecash");
+
+    const screenshotCanaries = await attendee.evaluate(() => {
+      const key = Object.keys(localStorage).find((item) => item.includes(":attendee:"));
+      const snapshot = key ? JSON.parse(localStorage.getItem(key) ?? "{}") : {};
+      const payment = snapshot.payments?.[0];
+      if (!payment) return [];
+      const payload = (() => {
+        try { return JSON.parse(payment.payloadJson ?? "{}"); } catch { return {}; }
+      })();
+      const capability = (() => {
+        try { return new URL(payment.deliveryUrl).pathname.split("/").pop(); } catch { return undefined; }
+      })();
+      return [
+        ...(snapshot.proofs ?? []).flatMap((proof: { secret?: string; C?: string }) => [proof.secret, proof.C]),
+        payment.id,
+        payment.orderId,
+        payment.request,
+        payment.deliveryUrl,
+        capability,
+        payment.payloadJson,
+        payment.token,
+        payment.refundPrivateKey,
+        payment.refundPublicKey,
+        ...(payload.proofs ?? []).flatMap((proof: { secret?: string; C?: string }) => [proof.secret, proof.C]),
+        ...(payment.swap?.inputs ?? []).flatMap((proof: { secret?: string; C?: string }) => [proof.secret, proof.C]),
+      ].filter((value): value is string => typeof value === "string");
+    });
+    await expectPublicCaptureSafe(attendee, screenshotCanaries);
+    await attendee.screenshot({ path: testInfo.outputPath(`attendee-refund-protected-${viewport.name}.png`), fullPage: true, animations: "disabled" });
 
     await attendee.clock.fastForward("05:01");
     const refund = attendee.getByRole("button", { name: "Refund if unspent" });

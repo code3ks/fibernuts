@@ -117,3 +117,35 @@ impl Drop for ReconciliationGuard<'_> {
             .fetch_sub(1, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settlement_metrics_expose_only_aggregate_numbers() {
+        let metrics = ReconciliationMetrics::default();
+        metrics.record_rpc(
+            Duration::from_millis(12),
+            Some(RpcFailureClass::RetryableTransport),
+        );
+        metrics.record_timeout();
+        metrics.record_retry();
+        metrics.set_backlog(3);
+        let rendered = format!("{:?}", metrics.snapshot()).to_ascii_lowercase();
+
+        for forbidden in [
+            "quote_id",
+            "payment_hash",
+            "invoice",
+            "preimage",
+            "proof",
+            "token",
+            "secret",
+            "credential",
+            "identifier",
+        ] {
+            assert!(!rendered.contains(forbidden));
+        }
+    }
+}

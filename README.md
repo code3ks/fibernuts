@@ -213,16 +213,19 @@ which is exactly what a melt quote needs.
 ## Development
 
 ```sh
-make setup   # rustfmt + clippy, checks for protoc
+make setup       # rustfmt + clippy, checks for protoc
 make test
-make ci      # fmt-check + lint + test + build (what CI runs)
+make evidence-ci # validate deterministic coverage and public-output redaction evidence
+make ci          # evidence + fmt-check + lint + test + build (what CI runs)
 ```
 
 `cdk-fiber` reaches the node only through an injectable `FiberRpc` trait, so the whole
 `MintPayment` implementation is tested against a mock, and `make ci` never touches a node. An
 opt-in suite (`--ignored`) runs the same invariants against a real devnet; `deploy/devnet.md` has
-the command. cdk is pinned to `=0.18.3`: its `MintPayment` trait changes shape across minor
-versions.
+the command. The machine-readable evidence index is
+[`docs/evidence/settlement-reliability.json`](docs/evidence/settlement-reliability.json); its live
+scenarios remain excluded from ordinary CI. cdk is pinned to `=0.18.3`: its `MintPayment` trait
+changes shape across minor versions.
 
 The Fiber wire types are hand-rolled rather than taken from the published `fiber-json-types`, which
 pulls the broad `ckb-*` type tree into a small payment adapter. The subset is checked directly

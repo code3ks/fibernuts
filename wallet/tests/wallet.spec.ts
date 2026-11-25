@@ -36,6 +36,21 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport + 1);
 }
 
+async function expectPublicCaptureSafe(page: Page, sensitiveValues: string[]) {
+  const visibleSurface = await page.evaluate(() => {
+    const values = Array.from(document.querySelectorAll("input, textarea, select"))
+      .filter((element) => {
+        const style = window.getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+      })
+      .map((element) => (element as HTMLInputElement).value);
+    return [document.body.innerText, ...values, window.location.href].join("\n");
+  });
+  for (const value of sensitiveValues.filter((item) => item.length >= 8)) {
+    expect(visibleSurface, "public screenshot surface exposed sensitive stored data").not.toContain(value);
+  }
+}
+
 interface MockMintOptions {
   meltExecution?: "PAID" | "PENDING" | "UNPAID" | "abort";
   meltStatus?: "PAID" | "PENDING" | "UNPAID";
@@ -719,9 +734,24 @@ test("an interrupted cash-out preserves provenance and reserved value across rel
   await expect(page.getByText("Payment pending")).toBeVisible();
   await expect(page.getByText(/selected proofs remain reserved and excluded/i)).toBeVisible();
 
+  const screenshotCanaries = await page.evaluate(() => {
+    const stored = JSON.parse(localStorage.getItem("fibernuts:wallet:v2:http://127.0.0.1:5174") ?? "{}");
+    const operation = stored.operations?.[0] ?? {};
+    return [
+      ...(stored.proofs ?? []).flatMap((proof: { secret?: string; C?: string }) => [proof.secret, proof.C]),
+      operation.id,
+      operation.invoice,
+      operation.quote?.quote,
+      operation.quote?.request,
+      ...(operation.reservedProofs ?? []).flatMap((proof: { secret?: string; C?: string }) => [proof.secret, proof.C]),
+      ...(operation.outputData ?? []).flatMap((output: { secret?: string; blindingFactor?: string }) => [output.secret, output.blindingFactor]),
+    ].filter((value): value is string => typeof value === "string");
+  });
+
   for (const viewport of viewports) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await expectNoHorizontalOverflow(page);
+    await expectPublicCaptureSafe(page, screenshotCanaries);
     await page.screenshot({ path: testInfo.outputPath(`cashout-recovery-${viewport.name}.png`), fullPage: true });
   }
 
