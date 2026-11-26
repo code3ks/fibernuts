@@ -275,6 +275,13 @@ Diagnostics may include version, network, operation type, redacted or keyed-hash
 state transition, bounded timing, error class, and aggregate counters. Redaction tests scan success,
 failure, timeout, retry, and panic/error formatting paths.
 
+The versioned [settlement evidence manifest](evidence/settlement-reliability.json) maps each required
+failure class and public-output sink to a reproducible test. `make evidence-ci` checks that every
+referenced source and selector still exists, that every declared class remains covered, and that the
+manifest and its machine-readable summary contain no recognized bearer or user-linked values. Live
+economic scenarios are named separately and remain explicit, ignored tests; ordinary CI never runs
+them or contacts a Fiber node.
+
 ## Current baseline versus target controls
 
 | Control | Current baseline | Required before completion |

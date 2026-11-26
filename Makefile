@@ -3,7 +3,7 @@ WALLET_NPM = npm --prefix wallet
 MARKET_NPM = npm --prefix market
 RELAY_NPM  = npm --prefix relay
 
-.PHONY: setup build test lint fmt fmt-check mint-ci wallet wallet-build wallet-ci relay-ci market-ci ci clean
+.PHONY: setup build test lint fmt fmt-check evidence-ci mint-ci wallet wallet-build wallet-ci relay-ci market-ci ci clean
 
 setup:
 	rustup component add rustfmt clippy
@@ -32,6 +32,10 @@ wallet-build:
 
 mint-ci: fmt-check lint test build
 
+evidence-ci:
+	node --test scripts/settlement-evidence.test.mjs
+	node scripts/verify-settlement-evidence.mjs
+
 wallet-ci:
 	$(WALLET_NPM) test -- --run
 	$(WALLET_NPM) run typecheck
@@ -48,7 +52,7 @@ market-ci:
 	$(MARKET_NPM) run build
 	$(MARKET_NPM) run test:e2e
 
-ci: mint-ci wallet-ci relay-ci market-ci
+ci: evidence-ci mint-ci wallet-ci relay-ci market-ci
 
 clean:
 	$(CARGO) clean

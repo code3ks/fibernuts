@@ -36,6 +36,27 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport + 1);
 }
 
+async function expectPublicCaptureSafe(page: Page, sensitiveValues: string[]) {
+  const captureSurface = await page.evaluate(() => {
+    const isVisible = (element: Element) => {
+      const style = window.getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && bounds.width > 0 && bounds.height > 0;
+    };
+    const values = Array.from(document.querySelectorAll("input, textarea, select"))
+      .filter(isVisible)
+      .map((element) => (element as HTMLInputElement).value);
+    return {
+      text: [document.body.innerText, ...values, window.location.href].join("\n"),
+      encodedMediaCount: Array.from(document.querySelectorAll(".qr-panel__code, canvas, video, img[src^='data:'], img[src^='blob:']")).filter(isVisible).length,
+    };
+  });
+  for (const value of sensitiveValues.filter((item) => item.length >= 8)) {
+    expect(captureSurface.text, "public screenshot surface exposed sensitive stored data").not.toContain(value);
+  }
+  expect(captureSurface.encodedMediaCount, "public screenshot surface contains encoded or camera media").toBe(0);
+}
+
 interface MockMintOptions {
   meltExecution?: "PAID" | "PENDING" | "UNPAID" | "abort";
   meltStatus?: "PAID" | "PENDING" | "UNPAID";
@@ -719,9 +740,24 @@ test("an interrupted cash-out preserves provenance and reserved value across rel
   await expect(page.getByText("Payment pending")).toBeVisible();
   await expect(page.getByText(/selected proofs remain reserved and excluded/i)).toBeVisible();
 
+  const screenshotCanaries = await page.evaluate(() => {
+    const stored = JSON.parse(localStorage.getItem("fibernuts:wallet:v2:http://127.0.0.1:5174") ?? "{}");
+    const operation = stored.operations?.[0] ?? {};
+    return [
+      ...(stored.proofs ?? []).flatMap((proof: { secret?: string; C?: string }) => [proof.secret, proof.C]),
+      operation.id,
+      operation.invoice,
+      operation.quote?.quote,
+      operation.quote?.request,
+      ...(operation.reservedProofs ?? []).flatMap((proof: { secret?: string; C?: string }) => [proof.secret, proof.C]),
+      ...(operation.outputData ?? []).flatMap((output: { secret?: string; blindingFactor?: string }) => [output.secret, output.blindingFactor]),
+    ].filter((value): value is string => typeof value === "string");
+  });
+
   for (const viewport of viewports) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await expectNoHorizontalOverflow(page);
+    await expectPublicCaptureSafe(page, screenshotCanaries);
     await page.screenshot({ path: testInfo.outputPath(`cashout-recovery-${viewport.name}.png`), fullPage: true });
   }
 

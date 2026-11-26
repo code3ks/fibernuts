@@ -31,11 +31,11 @@ const RECORD_COLUMNS: &str = "
 ";
 
 /// Errors raised while opening, validating, or mutating the settlement journal.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum JournalError {
     /// SQLite could not complete the requested operation.
-    #[error("settlement journal storage error: {0}")]
-    Storage(#[from] rusqlite::Error),
+    #[error("settlement journal storage error")]
+    Storage(rusqlite::Error),
 
     /// A thread panicked while holding the journal connection.
     #[error("settlement journal lock is unavailable")]
@@ -84,8 +84,26 @@ pub enum JournalError {
     DestinationExists,
 
     /// A filesystem operation around an atomic backup failed.
-    #[error("settlement journal filesystem error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("settlement journal filesystem error")]
+    Io(std::io::Error),
+}
+
+impl fmt::Debug for JournalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl From<rusqlite::Error> for JournalError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<std::io::Error> for JournalError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 /// Whether value is entering or leaving the mint over Fiber.
@@ -133,13 +151,25 @@ impl From<Option<Script>> for SettlementAsset {
 }
 
 /// Immutable identity shared by all records in one journal database.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct JournalScope {
     mint_url: String,
     unit: String,
     unit_scale: u64,
     network: Currency,
     asset: SettlementAsset,
+}
+
+impl fmt::Debug for JournalScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JournalScope")
+            .field("mint_url", &"[REDACTED]")
+            .field("unit", &self.unit)
+            .field("unit_scale", &self.unit_scale)
+            .field("network", &self.network)
+            .field("asset", &self.asset)
+            .finish()
+    }
 }
 
 impl JournalScope {
@@ -1377,10 +1407,16 @@ fn validate_semantic_content(connection: &Connection) -> Result<(), JournalError
 }
 
 fn validate_scope(scope: &JournalScope) -> Result<(), JournalError> {
+    let mint_url = reqwest::Url::parse(&scope.mint_url)
+        .map_err(|_| JournalError::InvalidOperation("mint URL"))?;
     if scope.mint_url.trim() != scope.mint_url
-        || !(scope.mint_url.starts_with("https://") || scope.mint_url.starts_with("http://"))
+        || !matches!(mint_url.scheme(), "https" | "http")
+        || mint_url.host_str().is_none()
+        || !mint_url.username().is_empty()
+        || mint_url.password().is_some()
         || scope.mint_url.ends_with('/')
-        || scope.mint_url.contains(['?', '#'])
+        || mint_url.query().is_some()
+        || mint_url.fragment().is_some()
     {
         return Err(JournalError::InvalidOperation("mint URL"));
     }

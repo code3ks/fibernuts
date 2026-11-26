@@ -1,5 +1,7 @@
 //! Errors raised by the Fiber payment backend.
 
+use std::fmt;
+
 use thiserror::Error;
 
 use crate::journal::JournalError;
@@ -18,14 +20,14 @@ pub enum RpcFailureClass {
 }
 
 /// Everything that can go wrong between the mint and the Fiber node.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum Error {
     /// Durable settlement correlation could not be read or updated safely.
     #[error(transparent)]
     Journal(#[from] JournalError),
 
     /// The HTTP request to the node never produced a JSON-RPC response.
-    #[error("fiber node unreachable: {0}")]
+    #[error("fiber node unreachable")]
     Transport(String),
 
     /// The configured request deadline elapsed without a complete response.
@@ -43,7 +45,7 @@ pub enum Error {
     },
 
     /// The node answered with a JSON-RPC error object.
-    #[error("fiber node rpc error {code}: {message}")]
+    #[error("fiber node rpc error {code}")]
     Rpc {
         /// JSON-RPC error code.
         code: i64,
@@ -52,11 +54,11 @@ pub enum Error {
     },
 
     /// The node's response did not match the expected shape.
-    #[error("fiber node returned an unexpected response: {0}")]
+    #[error("fiber node returned an unexpected response")]
     Decode(String),
 
     /// A hex string was not a 32-byte `0x`-prefixed hash.
-    #[error("invalid 32-byte hash: {0}")]
+    #[error("invalid 32-byte hash")]
     InvalidHash(String),
 
     /// The mint asked for a payment method this backend does not serve.
@@ -67,9 +69,7 @@ pub enum Error {
     },
 
     /// The mint asked to settle in a unit this backend does not serve.
-    #[error(
-        "cdk-fiber is configured for unit `{configured}`, but the mint asked for `{requested}`"
-    )]
+    #[error("the mint requested an unsupported settlement unit")]
     UnitMismatch {
         /// The unit this backend was configured with.
         configured: String,
@@ -95,7 +95,7 @@ pub enum Error {
     AmountlessIncomingRequest,
 
     /// A Fiber invoice belongs to a different chain than the configured Fiber node.
-    #[error("fiber invoice network `{invoice}` does not match configured network `{configured}`")]
+    #[error("fiber invoice network does not match the configured network")]
     InvoiceNetworkMismatch {
         /// The network configured for this payment backend.
         configured: String,
@@ -120,7 +120,7 @@ pub enum Error {
     MissingSettlementOperation,
 
     /// The mint looked a payment up by something other than its payment hash.
-    #[error("cdk-fiber identifies payments by payment hash, got {0}")]
+    #[error("cdk-fiber identifies payments only by payment hash")]
     UnsupportedIdentifier(String),
 
     /// `wait_payment_event` was called while another subscriber owns the stream.
@@ -135,6 +135,13 @@ pub enum Error {
         /// Stable, non-sensitive explanation of the constraint.
         reason: &'static str,
     },
+}
+
+// Error variants retain raw node text for classification, but diagnostics must never render it.
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 impl Error {
@@ -210,5 +217,33 @@ mod tests {
             Error::Decode("malformed response".to_string()).rpc_failure_class(),
             RpcFailureClass::InvalidResponse
         );
+    }
+
+    #[test]
+    fn untrusted_error_fields_never_reach_display_or_debug_output() {
+        let canary = "synthetic-bearer-secret-never-log";
+        let errors = [
+            Error::Transport(canary.to_string()),
+            Error::Rpc {
+                code: -32_000,
+                message: canary.to_string(),
+            },
+            Error::Decode(canary.to_string()),
+            Error::InvalidHash(canary.to_string()),
+            Error::UnitMismatch {
+                configured: "rusd".to_string(),
+                requested: canary.to_string(),
+            },
+            Error::InvoiceNetworkMismatch {
+                configured: canary.to_string(),
+                invoice: canary.to_string(),
+            },
+            Error::UnsupportedIdentifier(canary.to_string()),
+        ];
+
+        for error in errors {
+            assert!(!format!("{error}").contains(canary));
+            assert!(!format!("{error:?}").contains(canary));
+        }
     }
 }

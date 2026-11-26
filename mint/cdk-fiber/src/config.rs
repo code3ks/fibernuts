@@ -1,5 +1,6 @@
 //! Backend configuration.
 
+use std::fmt;
 use std::time::Duration;
 
 use cdk_common::CurrencyUnit;
@@ -16,7 +17,7 @@ pub fn rusd_testnet_script() -> Script {
 }
 
 /// How the backend talks to its Fiber node and prices what it settles.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FiberConfig {
     /// Canonical public URL of the Cashu mint this processor serves. Journal records are bound to
     /// this URL so a database cannot be reused silently for another issuer.
@@ -68,6 +69,34 @@ pub struct FiberConfig {
     pub payment_timeout: Duration,
 }
 
+impl fmt::Debug for FiberConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FiberConfig")
+            .field("mint_url", &"[REDACTED]")
+            .field("unit", &self.unit)
+            .field("currency", &self.currency)
+            .field("udt_type_script", &self.udt_type_script)
+            .field("unit_scale", &self.unit_scale)
+            .field("invoice_expiry", &self.invoice_expiry)
+            .field("fee_percent", &self.fee_percent)
+            .field("min_fee_reserve", &self.min_fee_reserve)
+            .field("poll_interval", &self.poll_interval)
+            .field("rpc_connect_timeout", &self.rpc_connect_timeout)
+            .field("rpc_request_timeout", &self.rpc_request_timeout)
+            .field(
+                "reconciliation_max_backoff",
+                &self.reconciliation_max_backoff,
+            )
+            .field(
+                "reconciliation_concurrency",
+                &self.reconciliation_concurrency,
+            )
+            .field("incoming_watch_grace", &self.incoming_watch_grace)
+            .field("payment_timeout", &self.payment_timeout)
+            .finish()
+    }
+}
+
 impl FiberConfig {
     /// The defaults fibernuts ships: RUSD on testnet, one ecash unit per RUSD cent.
     pub fn rusd_testnet() -> Self {
@@ -98,6 +127,17 @@ mod tests {
     #[test]
     fn the_default_unit_renders_as_the_string_mintd_must_be_configured_with() {
         assert_eq!(FiberConfig::rusd_testnet().unit.to_string(), "rusd");
+    }
+
+    #[test]
+    fn configuration_debug_redacts_the_mint_identity() {
+        let mut config = FiberConfig::rusd_testnet();
+        config.mint_url = "https://operator:synthetic-secret@mint.example".to_string();
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("operator"));
+        assert!(!debug.contains("synthetic-secret"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

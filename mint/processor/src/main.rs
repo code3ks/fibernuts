@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
         .prune_terminal_before(now.saturating_sub(retention_secs))
         .context("could not apply settlement journal retention")?;
     tracing::info!(
-        %rpc_url,
+        rpc_endpoint = "configured",
         unit = %config.unit,
         scale = config.unit_scale,
         udt = config.udt_type_script.is_some(),

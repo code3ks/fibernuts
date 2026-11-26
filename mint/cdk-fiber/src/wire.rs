@@ -156,7 +156,7 @@ pub enum CkbInvoiceStatus {
 /// auto-settles an arriving TLC. Supplying only `payment_hash` would instead create a *hold*
 /// invoice, whose TLC stalls in `Received` until `settle_invoice` is called. A mint must never
 /// hold, so both fields stay off the wire.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct NewInvoiceParams {
     /// Amount in the UDT's base units (RUSD has 8 decimals).
     #[serde(with = "hex_u128")]
@@ -177,14 +177,38 @@ pub struct NewInvoiceParams {
     pub udt_type_script: Option<Script>,
 }
 
+impl std::fmt::Debug for NewInvoiceParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewInvoiceParams")
+            .field("amount", &self.amount)
+            .field(
+                "description",
+                &self.description.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("currency", &self.currency)
+            .field("expiry", &self.expiry)
+            .field("udt_type_script", &self.udt_type_script)
+            .finish()
+    }
+}
+
 /// The body of a decoded invoice.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct InvoiceData {
     /// `0x`-prefixed payment hash.
     pub payment_hash: String,
     /// Invoice attributes. FNN represents each enum variant as a one-key JSON object.
     #[serde(default)]
     pub attrs: Vec<serde_json::Value>,
+}
+
+impl std::fmt::Debug for InvoiceData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InvoiceData")
+            .field("payment_hash", &"[REDACTED]")
+            .field("attribute_count", &self.attrs.len())
+            .finish()
+    }
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<usize, Error> {
@@ -297,12 +321,21 @@ pub struct CkbInvoice {
 }
 
 /// Result of `new_invoice`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct InvoiceResult {
     /// The bech32m-encoded invoice the payer scans.
     pub invoice_address: String,
     /// The decoded invoice.
     pub invoice: CkbInvoice,
+}
+
+impl std::fmt::Debug for InvoiceResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InvoiceResult")
+            .field("invoice_address", &"[REDACTED]")
+            .field("invoice", &self.invoice)
+            .finish()
+    }
 }
 
 /// Result of `get_invoice`.
@@ -339,7 +372,7 @@ pub enum PaymentStatus {
 /// Only `invoice` identifies the payment: FNN merges the amount and `udt_type_script` out of the
 /// invoice itself, and rejects the call if a field passed here disagrees with it. Passing them
 /// redundantly buys nothing and risks a `does not match the invoice` error.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct SendPaymentParams {
     /// The bech32m invoice to pay.
     pub invoice: String,
@@ -357,6 +390,17 @@ pub struct SendPaymentParams {
     /// Compute a route and its fee without dispatching a TLC.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
+}
+
+impl std::fmt::Debug for SendPaymentParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendPaymentParams")
+            .field("invoice", &"[REDACTED]")
+            .field("max_fee_amount", &self.max_fee_amount)
+            .field("max_fee_rate", &self.max_fee_rate)
+            .field("dry_run", &self.dry_run)
+            .finish()
+    }
 }
 
 /// Result of both `send_payment` and `get_payment`.
@@ -381,7 +425,7 @@ pub struct PaymentResult {
 impl std::fmt::Debug for PaymentResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PaymentResult")
-            .field("payment_hash", &self.payment_hash)
+            .field("payment_hash", &"[REDACTED]")
             .field(
                 "payment_preimage",
                 &self.payment_preimage.as_ref().map(|_| "[REDACTED]"),
@@ -469,8 +513,9 @@ mod tests {
         // Synthetic fixture: never use or record a real payment preimage in tests.
         let preimage = format!("0x{}", "22".repeat(32));
         let failure_detail = "synthetic invoice-linked failure detail".to_string();
+        let payment_hash = format!("0x{}", "11".repeat(32));
         let payment = PaymentResult {
-            payment_hash: format!("0x{}", "11".repeat(32)),
+            payment_hash: payment_hash.clone(),
             payment_preimage: Some(preimage.clone()),
             status: PaymentStatus::Success,
             fee: 0,
@@ -478,9 +523,46 @@ mod tests {
         };
 
         let debug = format!("{payment:?}");
+        assert!(!debug.contains(&payment_hash));
         assert!(!debug.contains(&preimage));
         assert!(!debug.contains(&failure_detail));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn invoice_and_payment_request_debug_output_redacts_user_linked_values() {
+        let invoice = "fibt1synthetic-user-linked-invoice".to_string();
+        let payment_hash = format!("0x{}", "44".repeat(32));
+        let description = "synthetic user identifier".to_string();
+        let invoice_result = InvoiceResult {
+            invoice_address: invoice.clone(),
+            invoice: CkbInvoice {
+                currency: Currency::Fibt,
+                amount: Some(100),
+                data: InvoiceData {
+                    payment_hash: payment_hash.clone(),
+                    attrs: vec![serde_json::json!({ "private": description })],
+                },
+            },
+        };
+        let new_invoice = NewInvoiceParams {
+            amount: 100,
+            description: Some(description.clone()),
+            currency: Currency::Fibt,
+            expiry: Some(60),
+            udt_type_script: None,
+        };
+        let send = SendPaymentParams {
+            invoice: invoice.clone(),
+            max_fee_amount: Some(1),
+            max_fee_rate: Some(10),
+            dry_run: Some(false),
+        };
+
+        let debug = format!("{invoice_result:?} {new_invoice:?} {send:?}");
+        for canary in [&invoice, &payment_hash, &description] {
+            assert!(!debug.contains(canary));
+        }
     }
 
     #[test]

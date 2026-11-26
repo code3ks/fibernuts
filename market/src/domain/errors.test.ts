@@ -16,6 +16,21 @@ describe("safe error messages", () => {
   });
 
   it("uses a bounded fallback for unknown failures", () => {
+    const canaries = {
+      proof: "synthetic-proof-secret",
+      key: "2".repeat(64),
+      quote: "quote-user-linked-canary",
+      capability: "r".repeat(43),
+      publicKey: `02${"5".repeat(64)}`,
+      address: `ckt1${"b".repeat(64)}`,
+      email: "attendee@example.test",
+    };
+    const message = safeErrorMessage(new Error(
+      `proofSecret=${canaries.proof} refundPrivateKey=${canaries.key} quoteId=${canaries.quote} ` +
+      `writeCapability=${canaries.capability} ${canaries.publicKey} ` +
+      `address=${canaries.address} user=${canaries.email}`,
+    ));
+    for (const canary of Object.values(canaries)) expect(message).not.toContain(canary);
     expect(safeErrorMessage({ value: "not printable" }, "Safe fallback")).toBe("Safe fallback");
     expect(safeErrorMessage(new Error("x".repeat(800)))).toHaveLength(500);
   });
