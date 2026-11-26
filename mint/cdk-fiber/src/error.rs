@@ -95,7 +95,7 @@ pub enum Error {
     AmountlessIncomingRequest,
 
     /// A Fiber invoice belongs to a different chain than the configured Fiber node.
-    #[error("fiber invoice network `{invoice}` does not match configured network `{configured}`")]
+    #[error("fiber invoice network does not match the configured network")]
     InvoiceNetworkMismatch {
         /// The network configured for this payment backend.
         configured: String,
@@ -233,6 +233,10 @@ mod tests {
             Error::UnitMismatch {
                 configured: "rusd".to_string(),
                 requested: canary.to_string(),
+            },
+            Error::InvoiceNetworkMismatch {
+                configured: canary.to_string(),
+                invoice: canary.to_string(),
             },
             Error::UnsupportedIdentifier(canary.to_string()),
         ];

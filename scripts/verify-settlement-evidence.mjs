@@ -5,6 +5,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const MANIFEST_PATH = resolve(ROOT, "docs/evidence/settlement-reliability.json");
 const PUBLIC_SOURCE_ROOTS = ["docs/", "market/", "mint/", "relay/", "scripts/", "wallet/"];
+const ALLOWED_COMMAND_PREFIXES = [
+  "cargo test --manifest-path mint/Cargo.toml ",
+  "node --test ",
+  "npm --prefix market run test:e2e -- ",
+  "npm --prefix market test -- ",
+  "npm --prefix wallet run test:e2e -- ",
+  "npm --prefix wallet test -- "
+];
 
 const SENSITIVE_PATTERNS = [
   ["Cashu token", /cashu[AB][A-Za-z0-9_-]{20,}/i],
@@ -12,8 +20,9 @@ const SENSITIVE_PATTERNS = [
   ["Fiber invoice", /fib(?:t|d|b)1[0-9a-z]{30,}/i],
   ["CKB address", /\b(?:ckb|ckt)1[0-9a-z]{40,}\b/i],
   ["email", /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i],
+  ["compressed public key", /\b(?:0x)?(?:02|03)[a-f0-9]{64}\b/i],
   ["32-byte value", /\b(?:0x)?[a-f0-9]{64}\b/i],
-  ["named secret", /(?:privateKey|quotePrivateKey|refundPrivateKey|proofSecret|readCapability|writeCapability|credential|mnemonic|preimage|paymentHash|payment_hash|quoteId|quote_id)\s*[:=]\s*[A-Za-z0-9_-]{8,}/i]
+  ["named secret", /["']?(?:secret|proofSecret|token|privateKey|private_key|publicKey|public_key|quotePrivateKey|quote_secret|quoteSecret|quotePubkey|refundPrivateKey|refundPublicKey|readCapability|writeCapability|authorization|credential|mnemonic|seed|preimage|paymentHash|payment_hash|paymentId|payment_id|quoteId|quote_id|requestId|request_id|orderId|order_id|clientId|client_id|operationId|operation_id)["']?\s*[:=]\s*["']?[A-Za-z0-9_-]{8,}/i]
 ];
 
 function fail(message) {
@@ -47,9 +56,24 @@ function validateEntry(entry, kind) {
   }
   if (typeof entry.command !== "string" || entry.command.length === 0) fail(`${entry.id} has no command`);
   const text = sourceText(entry.source, entry.selector);
+  if (!ALLOWED_COMMAND_PREFIXES.some((prefix) => entry.command.startsWith(prefix))) fail(`${entry.id} uses an unsupported evidence command`);
+  if (/[\r\n;`<>|&#$]/.test(entry.command)) fail(`${entry.id} contains shell control syntax`);
+  if (!entry.command.includes(entry.selector)) fail(`${entry.id} command does not select its evidence`);
+  const workspace = entry.source.split("/", 1)[0];
+  if (entry.command.startsWith("npm --prefix ") && !entry.command.startsWith(`npm --prefix ${workspace} `)) {
+    fail(`${entry.id} command targets a different workspace`);
+  }
+  if (entry.source.endsWith(".mjs") && !entry.command.includes(entry.source)) fail(`${entry.id} command targets a different script`);
+  if (entry.source.includes("/tests/") && entry.source.endsWith(".rs")) {
+    const target = entry.source.split("/").at(-1).replace(/\.rs$/, "");
+    if (!entry.command.includes(`--test ${target} `)) fail(`${entry.id} command targets a different Rust test`);
+  }
   if (kind === "deterministic" && entry.command.includes("--ignored")) fail(`${entry.id} puts a live test in deterministic evidence`);
+  if (kind === "deterministic" && (typeof entry.invariant !== "string" || entry.invariant.length === 0)) fail(`${entry.id} has no invariant`);
   if (kind === "live") {
     if (entry.opt_in !== true || !entry.command.includes("--ignored")) fail(`${entry.id} is not explicitly opt-in`);
+    if (typeof entry.network !== "string" || entry.network.length === 0) fail(`${entry.id} has no network`);
+    if (typeof entry.expected_economic_effect !== "string" || entry.expected_economic_effect.length === 0) fail(`${entry.id} has no expected economic effect`);
     const offset = text.indexOf(entry.selector);
     const attributes = text.slice(Math.max(0, offset - 180), offset);
     if (!/#\[ignore(?:\s*=\s*"[^"]*")?\]/.test(attributes)) fail(`${entry.id} no longer points to an ignored test`);
@@ -77,7 +101,11 @@ export function loadManifest(path = MANIFEST_PATH) {
 
 export function validateManifest(manifest) {
   if (manifest?.schema_version !== 1 || manifest.scope !== "settlement-reliability-and-redaction") fail("unsupported manifest identity");
-  if (manifest.ordinary_ci?.command !== "make ci" || manifest.ordinary_ci?.live_network_access !== false) {
+  if (
+    manifest.ordinary_ci?.command !== "make ci" ||
+    manifest.ordinary_ci?.validator !== "node scripts/verify-settlement-evidence.mjs" ||
+    manifest.ordinary_ci?.live_network_access !== false
+  ) {
     fail("ordinary CI must be node-free and non-economic");
   }
   const requiredFailures = stringArray(manifest.required_failure_classes, "required_failure_classes");

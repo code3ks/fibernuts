@@ -4,9 +4,10 @@ const SENSITIVE_PATTERNS: Array<[RegExp, string]> = [
   [/fib(?:t|d|b)1[0-9a-z]+/gi, "[redacted Fiber invoice]"],
   [/(Bearer\s+)[A-Za-z0-9_-]{20,}/gi, "$1[redacted]"],
   [/(\/v1\/deliver\/)[A-Za-z0-9_-]{20,}/gi, "$1[redacted]"],
-  [/("?(?:secret|proofSecret|token|privateKey|quotePrivateKey|refundPrivateKey|readCapability|writeCapability|authorization|credential|mnemonic|seed|preimage|paymentHash|payment_hash|quoteId|quote_id|requestId|request_id|orderId|order_id|clientId|client_id|operationId|operation_id)"?\s*[:=]\s*"?)[^"\s,}]+/gi, "$1[redacted]"],
+  [/("?(?:secret|proofSecret|token|privateKey|publicKey|quotePrivateKey|quotePubkey|refundPrivateKey|refundPublicKey|readCapability|writeCapability|authorization|credential|mnemonic|seed|preimage|paymentHash|payment_hash|quoteId|quote_id|requestId|request_id|orderId|order_id|clientId|client_id|operationId|operation_id)"?\s*[:=]\s*"?)[^"\s,}]+/gi, "$1[redacted]"],
   [/\b(?:ckb|ckt)1[0-9a-z]{40,}\b/gi, "[redacted CKB address]"],
   [/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted email]"],
+  [/\b(?:0x)?(?:02|03)[a-f0-9]{64}\b/gi, "[redacted public key]"],
   [/0x[a-f0-9]{64}\b/gi, "[redacted 32-byte value]"],
   [/\b[a-f0-9]{64}\b/gi, "[redacted 32-byte value]"],
 ];

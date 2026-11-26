@@ -739,6 +739,24 @@ fn database_scope_cannot_be_rebound_to_another_mint() {
 }
 
 #[test]
+fn journal_scope_rejects_and_redacts_mint_url_credentials() {
+    let credential = "synthetic-mint-credential";
+    let scope = JournalScope::new(
+        format!("https://operator:{credential}@mint.example"),
+        "rusd",
+        1_000_000,
+        Currency::Fibt,
+        SettlementAsset::Udt(rusd_testnet_script()),
+    );
+    let debug = format!("{scope:?}");
+    assert!(!debug.contains(credential));
+
+    let journal = SettlementJournal::in_memory().unwrap();
+    let error = journal.bind_scope(&scope).unwrap_err();
+    assert!(matches!(error, JournalError::InvalidOperation("mint URL")));
+}
+
+#[test]
 fn debug_and_schema_exclude_bearer_and_signing_material() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("settlement.sqlite3");

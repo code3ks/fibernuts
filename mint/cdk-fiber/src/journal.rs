@@ -151,13 +151,25 @@ impl From<Option<Script>> for SettlementAsset {
 }
 
 /// Immutable identity shared by all records in one journal database.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct JournalScope {
     mint_url: String,
     unit: String,
     unit_scale: u64,
     network: Currency,
     asset: SettlementAsset,
+}
+
+impl fmt::Debug for JournalScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JournalScope")
+            .field("mint_url", &"[REDACTED]")
+            .field("unit", &self.unit)
+            .field("unit_scale", &self.unit_scale)
+            .field("network", &self.network)
+            .field("asset", &self.asset)
+            .finish()
+    }
 }
 
 impl JournalScope {
@@ -1395,10 +1407,16 @@ fn validate_semantic_content(connection: &Connection) -> Result<(), JournalError
 }
 
 fn validate_scope(scope: &JournalScope) -> Result<(), JournalError> {
+    let mint_url = reqwest::Url::parse(&scope.mint_url)
+        .map_err(|_| JournalError::InvalidOperation("mint URL"))?;
     if scope.mint_url.trim() != scope.mint_url
-        || !(scope.mint_url.starts_with("https://") || scope.mint_url.starts_with("http://"))
+        || !matches!(mint_url.scheme(), "https" | "http")
+        || mint_url.host_str().is_none()
+        || !mint_url.username().is_empty()
+        || mint_url.password().is_some()
         || scope.mint_url.ends_with('/')
-        || scope.mint_url.contains(['?', '#'])
+        || mint_url.query().is_some()
+        || mint_url.fragment().is_some()
     {
         return Err(JournalError::InvalidOperation("mint URL"));
     }

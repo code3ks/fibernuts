@@ -128,7 +128,7 @@
       "failure_classes": ["refund_race", "no_duplicate_balance_mutation"],
       "source": "market/src/domain/market-runtime.test.ts",
       "selector": "allows only one balance credit when refund and vendor settlement race",
-      "command": "npm --prefix market test -- --run src/domain/market-runtime.test.ts",
+      "command": "npm --prefix market test -- --run src/domain/market-runtime.test.ts -t \"allows only one balance credit when refund and vendor settlement race\"",
       "invariant": "The mint's first accepted swap is the only balance credit across both claimants."
     },
     {
@@ -195,7 +195,7 @@
       "sinks": ["error"],
       "source": "wallet/src/domain/errors.test.ts",
       "selector": "redacts named secrets and bounds untrusted errors",
-      "command": "npm --prefix wallet test -- --run src/domain/errors.test.ts"
+      "command": "npm --prefix wallet test -- --run src/domain/errors.test.ts -t \"redacts named secrets and bounds untrusted errors\""
     },
     {
       "id": "market-error-redaction",
@@ -203,14 +203,14 @@
       "sinks": ["error"],
       "source": "market/src/domain/errors.test.ts",
       "selector": "uses a bounded fallback for unknown failures",
-      "command": "npm --prefix market test -- --run src/domain/errors.test.ts"
+      "command": "npm --prefix market test -- --run src/domain/errors.test.ts -t \"uses a bounded fallback for unknown failures\""
     },
     {
       "id": "wallet-screenshot-redaction",
       "secret_classes": ["proof", "quote_secret", "fiber_invoice", "user_linked_identifier"],
       "sinks": ["screenshot"],
       "source": "wallet/tests/wallet.spec.ts",
-      "selector": "an interrupted cash-out preserves provenance and reserved value across reload",
+      "selector": "an interrupted cash-out",
       "command": "npm --prefix wallet run test:e2e -- --grep \"an interrupted cash-out\""
     },
     {
@@ -218,7 +218,7 @@
       "secret_classes": ["cashu_token", "proof", "capability", "signing_key", "user_linked_identifier"],
       "sinks": ["screenshot"],
       "source": "market/tests/market.spec.ts",
-      "selector": "expectPublicCaptureSafe(attendee, screenshotCanaries)",
+      "selector": "attendee refunds",
       "command": "npm --prefix market run test:e2e -- --grep \"attendee refunds\""
     },
     {
@@ -227,7 +227,7 @@
       "sinks": ["report"],
       "source": "scripts/settlement-evidence.test.mjs",
       "selector": "report scanner rejects every synthetic secret class",
-      "command": "node --test scripts/settlement-evidence.test.mjs"
+      "command": "node --test --test-name-pattern=\"report scanner rejects every synthetic secret class\" scripts/settlement-evidence.test.mjs"
     }
   ],
   "live_scenarios": [

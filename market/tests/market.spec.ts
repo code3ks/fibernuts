@@ -53,18 +53,24 @@ async function expectNoHorizontalOverflow(page: Page) {
 }
 
 async function expectPublicCaptureSafe(page: Page, sensitiveValues: string[]) {
-  const visibleSurface = await page.evaluate(() => {
+  const captureSurface = await page.evaluate(() => {
+    const isVisible = (element: Element) => {
+      const style = window.getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && bounds.width > 0 && bounds.height > 0;
+    };
     const values = Array.from(document.querySelectorAll("input, textarea, select"))
-      .filter((element) => {
-        const style = window.getComputedStyle(element);
-        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
-      })
+      .filter(isVisible)
       .map((element) => (element as HTMLInputElement).value);
-    return [document.body.innerText, ...values, window.location.href].join("\n");
+    return {
+      text: [document.body.innerText, ...values, window.location.href].join("\n"),
+      encodedMediaCount: Array.from(document.querySelectorAll(".qr-panel__code, canvas, video, img[src^='data:'], img[src^='blob:']")).filter(isVisible).length,
+    };
   });
   for (const value of sensitiveValues.filter((item) => item.length >= 8)) {
-    expect(visibleSurface, "public screenshot surface exposed sensitive stored data").not.toContain(value);
+    expect(captureSurface.text, "public screenshot surface exposed sensitive stored data").not.toContain(value);
   }
+  expect(captureSurface.encodedMediaCount, "public screenshot surface contains encoded or camera media").toBe(0);
 }
 
 function cors(route: Route) {

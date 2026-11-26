@@ -23,12 +23,14 @@ describe("safe wallet error messages", () => {
       key: "1".repeat(64),
       quote: "quote-user-linked-canary",
       capability: "c".repeat(43),
+      publicKey: `0x03${"4".repeat(64)}`,
       address: `ckt1${"a".repeat(64)}`,
       email: "person@example.test",
     };
     const message = safeErrorMessage(new Error(
       `secret=${canaries.secret} refundPrivateKey=${canaries.key} quote_id=${canaries.quote} ` +
-      `readCapability=${canaries.capability} address=${canaries.address} owner=${canaries.email}`,
+      `readCapability=${canaries.capability} ${canaries.publicKey} ` +
+      `address=${canaries.address} owner=${canaries.email}`,
     ));
     for (const canary of Object.values(canaries)) expect(message).not.toContain(canary);
     expect(safeErrorMessage({ message: "not trusted" }, "Safe fallback")).toBe("Safe fallback");

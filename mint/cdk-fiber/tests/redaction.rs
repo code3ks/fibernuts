@@ -1,9 +1,9 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
-use cdk_fiber::journal::JournalError;
-use cdk_fiber::wire::{PaymentResult, PaymentStatus, SendPaymentParams};
-use cdk_fiber::{Error, HttpFiberRpc};
+use cdk_fiber::journal::{JournalError, JournalScope, SettlementAsset};
+use cdk_fiber::wire::{Currency, PaymentResult, PaymentStatus, SendPaymentParams};
+use cdk_fiber::{Error, FiberConfig, HttpFiberRpc};
 use tracing_subscriber::fmt::MakeWriter;
 
 #[derive(Clone, Default)]
@@ -48,6 +48,7 @@ fn tracing_error_and_debug_output_redact_all_canaries() {
         "cashuBsyntheticBearerCanary quotePrivateKey={signing_key} proofSecret={proof_secret} readCapability={capability} user@example.test"
     );
     let rpc_password = "synthetic-rpc-password";
+    let mint_password = "synthetic-mint-password";
 
     let error = Error::Rpc {
         code: -32_000,
@@ -69,6 +70,15 @@ fn tracing_error_and_debug_output_redact_all_canaries() {
         dry_run: Some(false),
     };
     let rpc = HttpFiberRpc::new(format!("http://operator:{rpc_password}@127.0.0.1:1")).unwrap();
+    let mut config = FiberConfig::rusd_testnet();
+    config.mint_url = format!("https://operator:{mint_password}@mint.example");
+    let scope = JournalScope::new(
+        config.mint_url.clone(),
+        "rusd",
+        1_000_000,
+        Currency::Fibt,
+        SettlementAsset::Native,
+    );
 
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
@@ -84,6 +94,8 @@ fn tracing_error_and_debug_output_redact_all_canaries() {
             payment = ?payment,
             request = ?request,
             rpc = ?rpc,
+            config = ?config,
+            scope = ?scope,
             journal_error = ?journal_error,
             "synthetic redaction exercise"
         );
@@ -99,6 +111,7 @@ fn tracing_error_and_debug_output_redact_all_canaries() {
         proof_secret,
         capability,
         rpc_password,
+        mint_password,
     ] {
         assert!(
             !output.contains(canary),
