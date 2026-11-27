@@ -12,13 +12,15 @@ Fiber-settled Cashu mint. Nothing is forked, patched, or vendored.
 
 Three properties come out of the combination, and none of them hold for either system alone:
 
-- **Instant and private.** Cashu proofs are bearer tokens. Sending one is a message, not a
-  transaction, and the mint cannot tell who holds what.
+- **Private bearer transfers.** Sending a Cashu proof is a message rather than an on-chain
+  transaction, so it creates no public transfer graph. Blind signatures prevent the mint from
+  directly linking issuance to redemption; timing, amount, network, browser, and policy metadata
+  can still be visible.
 - **Denominated in a stablecoin.** Fiber channels can be funded with a UDT, so an ecash unit is one
   RUSD **cent** rather than a fraction of a volatile coin.
-- **Really settled.** Ecash is a claim on the mint; the mint's claim is a Fiber channel balance,
-  which is a claim on CKB. Wallets mint by paying a Fiber invoice and melt by having the mint pay
-  one.
+- **Fiber-backed entry and exit.** Ecash is a custodial claim on the mint; the mint's backing is a
+  Fiber channel balance backed by CKB assets. Wallets add cash by paying a Fiber invoice and cash
+  out by asking the mint to pay one, subject to mint policy and available route liquidity.
 
 ```
 wallet ──HTTP──▶ cdk-mintd ──gRPC──▶ fibernuts-processor ──JSON-RPC──▶ fiber node ──▶ CKB
@@ -219,6 +221,10 @@ make evidence-ci # validate deterministic coverage and public-output redaction e
 make ci          # evidence + fmt-check + lint + test + build (what CI runs)
 ```
 
+The [M1 settlement reliability and refund report](docs/report/m1-settlement-reliability.md) maps
+the delivered issues to reproducible acceptance checks, stable devnet evidence, known limitations,
+and the public review gate.
+
 `cdk-fiber` reaches the node only through an injectable `FiberRpc` trait, so the whole
 `MintPayment` implementation is tested against a mock, and `make ci` never touches a node. An
 opt-in suite (`--ignored`) runs the same invariants against a real devnet; `deploy/devnet.md` has
@@ -242,6 +248,8 @@ against the exact pinned Fiber source and covered by encoding tests.
   the settlement, signer, browser-key, and refund threat model.
 - [`docs/mainnet-validation.md`](docs/mainnet-validation.md) records the mainnet RUSD identity and
   the no-go-by-default validation gate.
+- [`docs/report/m1-settlement-reliability.md`](docs/report/m1-settlement-reliability.md) packages
+  the M1 release evidence, limitations, budget status, and review process.
 
 ## Roadmap
 
