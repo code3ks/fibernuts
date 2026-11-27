@@ -27,16 +27,21 @@ node. It pays a bounded number of fixed, browser-locked mint quotes so users can
 before consumer LSP and wallet funding flows exist. It is reference infrastructure, not part of the
 mint trust model and not a general payment endpoint.
 
-**The users** run nothing. They point any Cashu wallet — the one in this repo, or any NUT-04/NUT-05
-wallet (Cashu.me, Nutstash, a mobile app, a CLI) — at the operator's mint URL. They:
+**The users** need only a compatible Cashu wallet to hold and transfer ecash. Adding cash and
+cashing out also require access to a Fiber payer or wallet with a routable RUSD channel unless an
+operator exposes a separate funding integration. Users point the wallet in this repository, or
+another wallet that supports the mint's Fiber method and RUSD unit, at the operator's mint URL.
+They:
 
-- **mint** ecash by paying the mint's Fiber invoice (RUSD flows in over a channel),
-- **hold** bearer tokens in their own device (the mint never sees who holds what),
-- **send / receive** those tokens peer-to-peer — instant, free, private, off the mint entirely,
-- **melt** back to RUSD over Fiber when they want to cash out.
+- **add cash** by paying the mint's Fiber invoice, so RUSD flows in over a channel;
+- **hold** bearer tokens on their own device, while accepting that browser storage is not a secure
+  vault or guaranteed backup;
+- **send and receive** tokens directly without an on-chain transaction or public transfer graph;
+- **cash out** through a Fiber invoice when the mint accepts the request and a route has enough
+  directional liquidity.
 
-So the "infra" is the operator's four services. Everything a user does is an HTTP call to that mint
-plus local token handling.
+The operator's four services are the protocol infrastructure. Token handling and direct transfers
+remain local to users; entry and exit also involve the external Fiber payment rail.
 
 ## Is it hosted?
 
@@ -53,14 +58,15 @@ mint can flip a config switch and settle over Fiber. That's the real distributio
 ## The trust model — say it plainly
 
 A Cashu mint is **custodial**. The operator holds the RUSD backing; users hold ecash, which is an
-IOU on that mint. Users trust the operator not to disappear with the reserve. In exchange they get
-transfers that are instant, free, and private — the mint cannot tell who paid whom, or who holds a
-balance.
+IOU on that mint. Users trust the operator to preserve the reserve and honor redemption. Direct
+bearer transfers do not create an on-chain transfer graph, and blind signatures prevent the mint
+from directly linking issuance to redemption. Timing, amount, network, browser, and mint-policy
+metadata remain visible.
 
-Fiber is what keeps this from being a closed silo: value **enters and leaves** the mint over real
-payment channels. A user isn't trapped — they melt back to RUSD on Fiber (and, via Fiber's
-cross-chain hub, potentially onward to Bitcoin Lightning) whenever they choose. The mint is a fast,
-private layer *on top of* real settlement, not a walled garden.
+Fiber provides the route by which value can **enter and leave** the mint over payment channels. It
+does not guarantee an exit: redemption still depends on mint availability and policy plus enough
+directional route liquidity. A user can be unable to redeem even while holding valid ecash. When
+those conditions are met, the mint can pay RUSD back over Fiber.
 
 This is the same tradeoff every Cashu mint makes; fibernuts's contribution is making the backing
 asset a **stablecoin settled over Fiber**, so the IOU is denominated in dollars rather than a
@@ -89,10 +95,10 @@ None of that changes `cdk-fiber`; it's the ordinary cost of running a payment se
 
 ## Who would actually use it
 
-- a **merchant** issuing store credit or gift cards backed by a stablecoin, redeemable for real RUSD;
+- a **merchant** issuing store credit or gift cards intended to be redeemable for RUSD;
 - a **community or DAO** running internal, private, instant payments without a chain fee per transfer;
 - an **exchange or app** offering instant, private RUSD withdrawals that settle over Fiber;
-- a **game** issuing in-app currency that's actually redeemable, not just a database number.
+- a **game** issuing in-app currency backed by an operator-managed RUSD reserve.
 
 In every case the pattern is the same: the operator runs the mint, users hold bearer ecash, and
 Fiber moves the real stablecoin in and out.

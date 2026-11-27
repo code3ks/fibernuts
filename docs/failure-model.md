@@ -7,7 +7,7 @@ change, which states must survive interruption, and which failures remain ambigu
 This is a design and verification contract. Controls marked **target** are not claims about the
 current implementation.
 
-Last reviewed: 2026-11-24.
+Last reviewed: 2026-11-27.
 
 ## Security goals
 
@@ -284,7 +284,7 @@ them or contacts a Fiber node.
 
 ## Current baseline versus target controls
 
-| Control | Current baseline | Required before completion |
+| Control | Current baseline | Further evidence or hardening |
 |---|---|---|
 | Only `Paid` authorizes incoming settlement | Tested | Preserve through stable upgrade and restart journal |
 | Timeout/unknown never becomes failed cash-out | Durable restart reconciliation, delayed terminal events, request deadlines, and timeout fault injection tested | Extend live failure evidence at each release pin |
